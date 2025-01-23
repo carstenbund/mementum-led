@@ -1,11 +1,15 @@
 #include "ws_flow.h"
 #include <stdio.h>
 
+// Rotation index variable (0: 0°, 1: 90°, 2: 180°, 3: 270°)
+int matrix_rotation = 1; // Example: 1 corresponds to 90° rotation
+
 Adafruit_NeoMatrix Matrix = Adafruit_NeoMatrix(8, 8, RGB_Control_PIN,    
   //NEO_MATRIX_TOP     + NEO_MATRIX_LEFT +   
   NEO_MATRIX_BOTTOM  + NEO_MATRIX_RIGHT +            
   NEO_MATRIX_ROWS    + NEO_MATRIX_PROGRESSIVE,
   NEO_GRB            + NEO_KHZ800);      
+
 
 int MatrixWidth = 0;
 
@@ -31,7 +35,7 @@ void filterString(char input[], char output[]) {
       String filteredString = inputString.substring(strlen(colorMap[i].prefix));
       // Convert the filtered String back to char array
       filteredString.toCharArray(output, filteredString.length() + 1);
-      printf("Filtered: %s\r\n", output);
+      //printf("Filtered: %s\r\n", output);
       return;
     }
   }
@@ -71,17 +75,17 @@ void Matrix_Init() {
   Matrix.begin(); 
   Matrix.setTextWrap(false);    
   
-  // English: Please note that the brightness of the lamp bead should not be too high, which can easily cause the temperature of the board to rise rapidly, thus damaging the board !!!
-  // Chinese: 请注意，灯珠亮度不要太高，容易导致板子温度急速上升，从而损坏板子!!!  
   Matrix.setBrightness(20);                             // set brightness
   Matrix.setTextColor( Matrix.Color(0, 255, 128)); 
   MatrixWidth   = Matrix.width();
+   // Apply the rotation index (0-3)
+  Matrix.setRotation(matrix_rotation);
 }
 
 void Text_Flow(char* Text) {
   static unsigned long lastUpdate = 0;
   unsigned long currentMillis = millis();
-  const unsigned long updateInterval = 100; // Adjust as needed for scroll speed
+  const unsigned long updateInterval = 70; // Adjust as needed for scroll speed
 
   if (currentMillis - lastUpdate >= updateInterval) {
     lastUpdate = currentMillis;
@@ -92,25 +96,11 @@ void Text_Flow(char* Text) {
     Matrix.print(F(Text));                      
     Matrix.show();
 
-    Serial.printf("MatrixWidth: %d\r\n", MatrixWidth);
+    //printf("MatrixWidth: %d\r\n", MatrixWidth);
     if (--MatrixWidth < -textWidth) {      
       MatrixWidth = Matrix.width();
       Flow_Flag = true; // Indicate that the string has finished displaying
-      Serial.println("Flow_Flag set to true");
+      //printf("Flow_Flag set to true\n");
     }
   }
-}
-
-
-void xText_Flow(char* Text) {
-  filterString(Text, Text);
-  int textWidth   = getStringWidth(Text);
-  Matrix.fillScreen(0);                       
-  Matrix.setCursor(MatrixWidth,0);
-  //printf("Filtered: %s\r\n", Text);
-  Matrix.print(F(Text));                      
-  if (--MatrixWidth < -textWidth) {      
-    MatrixWidth = Matrix.width();
-  }
-  Matrix.show();
 }

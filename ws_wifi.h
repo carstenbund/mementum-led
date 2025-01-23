@@ -1,6 +1,8 @@
 #ifndef _WS_WIFI_H_
 #define _WS_WIFI_H_
 
+#include <Adafruit_NeoMatrix.h>
+
 #include <WiFi.h>
 #include <WebServer.h> 
 #include <WiFiClient.h>
@@ -8,21 +10,25 @@
 #include "stdio.h"
 #include "ws_flow.h"
 
-// The name and password of the WiFi access point
-#define APSSID       "ESP32-S3-Matrix"
-#define APPSK        "waveshare"
-
 extern volatile bool Flow_Flag;
 extern char Text[100];
 
+extern char apSSID[64];
+extern char apPSK[64];
+
+extern String serverAddress;
+extern bool isAPMode;
 
 #define MAX_SENT_STRINGS 5
 extern String sentStrings[MAX_SENT_STRINGS];
 extern int sentCount;
 extern int sentIndex;
 
-#define PREMADE_COUNT 5
-extern const char* preMadeStrings[PREMADE_COUNT];
+#define MAX_TEXT_LENGTH 50
+#define PREMADE_COUNT 8
+extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
+
+extern Adafruit_NeoMatrix Matrix;
 
 void handleRoot();
 void handleGetData();

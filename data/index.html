@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UNANGEBRACHT</title>
+      <style>
+        /* Existing styles */
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 0;
+        }
+        .header {
+            text-align: center;
+            padding: 20px 0;
+            background-color: #333;
+            color: #fff;
+            margin-bottom: 20px;
+        }
+        .container {
+            max-width: 800px; /* Increased width to accommodate new sections */
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 5px;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.3);
+        }
+        .input-container, .sent-strings-container, .pre-made-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .input-container label {
+            width: 100%;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .input-container input[type="text"] {
+            flex: 1;
+            padding: 5px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            margin-bottom: 10px;
+            width: 80%;
+        }
+        .radio-buttons, .pre-made-buttons {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .radio-buttons button, .pre-made-buttons button {
+            padding: 5px 10px;
+            background-color: #333;
+            color: #fff;
+            font-size: 12px;
+            font-weight: bold;
+            border: none;
+            border-radius: 2px;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .radio-buttons button:hover, .pre-made-buttons button:hover {
+            background-color: #555;
+        }
+        .input-container button, .button-container button {
+            padding: 5px 10px;
+            background-color: #333;
+            color: #fff;
+            font-size: 14px;
+            font-weight: bold;
+            border: none;
+            border-radius: 3px;
+            text-transform: uppercase;
+            cursor: pointer;
+            margin-right: 5px;
+        }
+        .sent-strings-list {
+            width: 80%;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 10px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <script defer="defer">
+        var selectedColor = '';
+        var sentStrings = [];
+        var preMadeStrings = [];
+
+        function setColor(color) {
+            selectedColor = color;
+            sendData();
+        }
+
+        function sendData() {
+            var textData = document.getElementById('Text').value;
+            textData = selectedColor + textData;
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/SendData?data=' + encodeURIComponent(textData), true);
+            xhr.send();
+            fetchSentStrings(); // Refresh the sent strings list
+        }
+
+        function clearText() {
+            document.getElementById('Text').value = '';
+            selectedColor = '';
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/clear', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4 && xhr.status === 200) {
+                    sentStrings = JSON.parse(xhr.responseText);
+                    displaySentStrings();
+                }
+            };
+            xhr.send();
+            fetchSentStrings();
+        }
+
+        function deleteSelectedEntries() {
+            var selectedIndexes = [];
+            var checkboxes = document.querySelectorAll('#sentStringsList input[type="checkbox"]');
+            
+            checkboxes.forEach((checkbox, index) => {
+                if (checkbox.checked) {
+                    selectedIndexes.push(index); // Collect the index of checked items
+                }
+            });
+            
+            if (selectedIndexes.length > 0) {
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '/deleteSelected', true);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState === 4 && xhr.status === 200) {
+                        // Update the sent strings list after deletion
+                        sentStrings = JSON.parse(xhr.responseText);
+                        displaySentStrings();
+                    }
+                };
+                xhr.send(JSON.stringify({ indexes: selectedIndexes }));
+            } else {
+                alert('No items selected for deletion.');
+            }
+        }
+
+
+        function fetchSentStrings() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/getData', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4 && xhr.status === 200) {
+                    sentStrings = JSON.parse(xhr.responseText);
+                    displaySentStrings();
+                }
+            };
+            xhr.send();
+        }
+
+        function fetchPreMadeStrings() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/getPreMade', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4 && xhr.status === 200) {
+                    preMadeStrings = JSON.parse(xhr.responseText);
+                    displayPreMadeStrings();
+                }
+            };
+            xhr.send();
+        }
+
+        function displaySentStrings() {
+            var list = document.getElementById('sentStringsList');
+            list.innerHTML = '';
+            sentStrings.forEach(function(str, index) {
+                var option = document.createElement('div');
+                option.style.marginBottom = '5px';
+                option.innerHTML = `<input type="checkbox" id="sent${index}" value="${str}">
+                                    <label for="sent${index}">${str}</label>`;
+                list.appendChild(option);
+            });
+        }
+
+        function displayPreMadeStrings() {
+            var container = document.getElementById('preMadeList');
+            container.innerHTML = '';
+            preMadeStrings.forEach(function(str) {
+                var button = document.createElement('button');
+                button.textContent = str;
+                button.onclick = function() {
+                    document.getElementById('Text').value = str;
+                };
+                container.appendChild(button);
+            });
+        }
+
+        window.onload = function() {
+            fetchSentStrings();
+            fetchPreMadeStrings();
+        };
+    </script>
+    <div class="header">
+        <h1>UNANGEBRACHT</h1>
+    </div>
+    <div class="container">
+        <div class="input-container">
+            <label for="input1">Text</label>
+            <input type="text" id="Text" />
+            <div class="radio-buttons">
+                <button onclick="setColor('@red')" style="background-color: red;">Rot</button>
+                <button onclick="setColor('@green')" style="background-color: green;">Grün</button>
+                <button onclick="setColor('@blue')" style="background-color: blue;">Blau</button>
+                <button onclick="setColor('@pink')" style="background-color: pink; color: #333;">Pink</button>
+                <button onclick="setColor('@yellow')" style="background-color: yellow; color: #333;">Gelb</button>
+                <button onclick="setColor('@cyan')" style="background-color: cyan; color: #333;">Cyan</button>
+            </div>
+            <button value="SendData" id="btn1" onclick="sendData()">Anzeigen</button><p></p>
+            <button value="ClearText" id="btnClear" onclick="clearText()">Alle Löschen</button>
+            <!-- <button onclick="deleteSelectedEntries()">Löschen</button> -->
+        </div>
+        <div class="sent-strings-container">
+            <h3>Text Angezeigt:</h3>
+            <div id="sentStringsList" class="sent-strings-list">
+                <!-- Sent strings will be populated here -->
+            </div>
+        </div>
+        <div class="pre-made-container">
+            <h3>Vorgaben:</h3>
+            <div id="preMadeList" class="pre-made-buttons">
+                <!-- Pre-made strings buttons will be populated here -->
+            </div>
+        </div>
+        <div class="button-container">
+            <button value="RGBOn" id="btn2" onclick="ledSwitch(2)">RGB On</button>
+            <button value="RGBOff" id="btn3" onclick="ledSwitch(3)">RGB Off</button>
+        </div>
+    </div>
+</body>
+</html>
+                

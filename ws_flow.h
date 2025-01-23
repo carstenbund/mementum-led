@@ -13,14 +13,14 @@ extern volatile bool Flow_Flag;
 // Global variable to manage scrolling
 extern int MatrixWidth;
 extern Adafruit_NeoMatrix Matrix;
-
+extern int matrix_rotation; 
 
 // Define color values
 #define RED_COLOR Matrix.Color(0, 255, 0)
 #define GREEN_COLOR Matrix.Color(255, 0, 0)
 #define BLUE_COLOR Matrix.Color(0, 0, 255)
 #define PINK_COLOR Matrix.Color(0, 255, 128)
-#define YELLO_COLOR Matrix.Color(255, 255, 0)
+#define YELLO_COLOR Matrix.Color(128, 192, 0)
 #define CYAN_COLOR Matrix.Color(255, 0, 128)
 #define WHITE_COLOR Matrix.Color(255, 255, 255) // Default color
 
