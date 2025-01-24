@@ -4,6 +4,8 @@
 #include <Adafruit_NeoMatrix.h>
 
 #include <WiFi.h>
+#include <esp_event.h>
+//#include <esp_wifi.h>
 #include <WebServer.h> 
 #include <WiFiClient.h>
 #include <WiFiAP.h>
@@ -27,6 +29,11 @@ extern int sentIndex;
 #define MAX_TEXT_LENGTH 50
 #define PREMADE_COUNT 8
 extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
+
+// Define sentStrings, sentIndex, sentCount, and playCount
+extern int playCount[MAX_SENT_STRINGS];
+extern int max_plays;
+extern bool isDisplaying;
 
 extern Adafruit_NeoMatrix Matrix;
 

@@ -9,9 +9,14 @@ char ipStr[16];
 WebServer server(80);                               
 
 bool isAPMode = true; // Set to false for client mode
+bool isConnected = false;
 String serverAddress = "http://10.10.10.1"; // Server address for registration and heartbeat
 unsigned long lastHeartbeat = 0; // Tracks the last time the heartbeat was sent
 const unsigned long heartbeatInterval = 30000; // Heartbeat interval in milliseconds (30 seconds)
+
+const unsigned long HEARTBEAT_TIMEOUT = 80000; // 2 minutes in milliseconds
+unsigned long lastCleanup = 0;                 // Last cleanup time
+const unsigned long CLEANUP_INTERVAL = 30000;  // Cleanup interval (30 seconds)
 
 int clientId = -1; // Client's assigned ID from the server
 
@@ -23,7 +28,6 @@ struct registeredClient {
 
 std::vector<registeredClient> registeredClients;
 
-
 struct BroadcastTaskParameters {
     String command;      // Command to be sent
     IPAddress clientIP;  // Client's IP address
@@ -32,13 +36,6 @@ struct BroadcastTaskParameters {
     unsigned long timecode; // For scheduling or later use
     String route;         // Dynamic route for the request
 };
-
-
-
-const unsigned long HEARTBEAT_TIMEOUT = 120000; // 2 minutes in milliseconds
-unsigned long lastCleanup = 0;                 // Last cleanup time
-const unsigned long CLEANUP_INTERVAL = 30000;  // Cleanup interval (30 seconds)
-
 
 String urlEncode(const String &str) {
     String encodedString = "";
@@ -66,10 +63,8 @@ void sendCommandToClient(void *parameters) {
         if (!taskParams->command.isEmpty() && taskParams->route == "/SendData") {
             url += "?data=" + encodedCommand;
         }
-
         printf("Broadcasting to client ID=%d, URL=%s, Attempt=%d/%d, Timecode=%lu\n",
                taskParams->clientId, url.c_str(), i + 1, taskParams->repeat, taskParams->timecode);
-
         http.begin(url); // Initialize the HTTP request
 
         int httpCode = http.GET(); // Send the GET request
@@ -80,14 +75,11 @@ void sendCommandToClient(void *parameters) {
             printf("Failed to send command to client ID=%d. Error: %s\n",
                    taskParams->clientId, http.errorToString(httpCode).c_str());
         }
-
         http.end(); // Close the connection
-
         if (i < taskParams->repeat - 1) {
             delay(1000); // Optional delay between repeats
         }
     }
-
     delete taskParams; // Clean up allocated memory
     vTaskDelete(NULL); // End the task
 }
@@ -162,7 +154,6 @@ void handleRoot() {
     printf("Home page served from SPIFFS\n");
 }
 
-
 void handleRegister() {
     IPAddress clientIP = server.client().remoteIP();
     uint32_t currentTime = millis();
@@ -185,7 +176,6 @@ void handleRegister() {
     }
 }
 
-
 void handleHeartbeat() {
     if (server.hasArg("index")) {
         int clientId = server.arg("index").toInt();
@@ -202,10 +192,11 @@ void handleHeartbeat() {
     }
 }
 
+unsigned long dynamicHeartbeatInterval = heartbeatInterval;
+
 void sendHeartbeat() {
-    if (serverAddress.isEmpty() || clientId == -1) {
-        printf("Server address not set or client not registered. Cannot send heartbeat.\n");
-        printf("ClientID: %n, Server Address: %s\n", clientId, serverAddress.c_str());
+    if (serverAddress.isEmpty() || clientId == -1 || !isConnected) {
+        printf("Cannot send heartbeat. Server not set or not connected.\n");
         return;
     }
 
@@ -214,16 +205,18 @@ void sendHeartbeat() {
 
     printf("Sending heartbeat to server: %s\n", heartbeatEndpoint.c_str());
     http.begin(heartbeatEndpoint);
-    // Send GET request
     int httpCode = http.GET();
+
     if (httpCode > 0) {
-        printf("Heartbeat acknowledged by server. Response: %s\n", http.getString().c_str());
+        printf("Heartbeat acknowledged: %s\n", http.getString().c_str());
+        dynamicHeartbeatInterval = heartbeatInterval; // Reset interval on success
     } else {
-        printf("Failed to send heartbeat. Error: %s\n", http.errorToString(httpCode).c_str());
+        printf("Heartbeat failed. Error: %s\n", http.errorToString(httpCode).c_str());
+        dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
+        isConnected = false;
     }
     http.end();
 }
-
 
 void cleanupStaleClients() {
     unsigned long currentMillis = millis();
@@ -232,6 +225,7 @@ void cleanupStaleClients() {
     if (currentMillis - lastCleanup < CLEANUP_INTERVAL) {
         return;
     }
+    printf("Cleanup Stale Clients");
     lastCleanup = currentMillis;
 
     // Iterate through the registered clients and remove stale ones
@@ -240,6 +234,7 @@ void cleanupStaleClients() {
             printf("Removing stale client: ID=%d, IP=%s\n", it->id, it->ip.toString().c_str());
             it = registeredClients.erase(it); // Remove the stale client
         } else {
+            printf("Cleanup Stale Clients no Timeout %n", it);
             ++it; // Move to the next client
         }
     }
@@ -286,6 +281,59 @@ void handleDeleteSelected() {
         handleGetData();
     } else {
         server.send(400, "text/plain", "Missing indexes parameter.");
+    }
+}
+
+void handleResetPlayCount() {
+    bool anyPlayCountReset = false; // Track if any play count is reset
+    if (server.hasArg("indexes")) {
+        String playIndexes = server.arg("indexes");
+        // server
+        if (isAPMode) {
+              // Only broadcast in server mode
+              String replayURL = "/resetPlayCount?indexes=" + playIndexes;
+              printf("Broadcasting command: %s\n", replayURL.c_str());
+              broadcastCommand("", 1, millis(), replayURL);
+        }
+        // Parse the "indexes" query parameter (e.g., "0,2,4")
+        String indexesArg = server.arg("indexes");
+        std::vector<int> indexes;
+        char *token = strtok(indexesArg.begin(), ",");
+        while (token != NULL) {
+            int index = atoi(token);
+            if (index >= 0 && index < MAX_SENT_STRINGS) {
+                indexes.push_back(index);
+            }
+            token = strtok(NULL, ",");
+        }
+
+        // Reset play counts for the specified indices
+        for (int index : indexes) {
+            if (playCount[index] > 0) { // Only reset if it's greater than 0
+                playCount[index] = 0;
+                anyPlayCountReset = true;
+                printf("Play count for index %d has been reset.\n", index);
+            }
+        }
+
+        server.send(200, "text/plain", "Play counts reset for specified indices.");
+    } else {
+        // If no indices are provided, reset all play counts
+        for (int i = 0; i < MAX_SENT_STRINGS; i++) {
+            if (playCount[i] > 0) { // Only reset if it's greater than 0
+                playCount[i] = 0;
+                anyPlayCountReset = true;
+            }
+        }
+
+        printf("All play counts have been reset.\n");
+        server.send(200, "text/plain", "All play counts reset.");
+    }
+
+    // Resume displaying if any play count was reset
+    if (anyPlayCountReset) {
+        isDisplaying = false; // Ensure the display loop starts fresh
+        printf("Display loop reset after play count changes.\n");
     }
 }
 
@@ -386,11 +434,59 @@ void handleSwitch(uint8_t ledNumber) {
 //void handleSendData()  { handleSwitch(1); }
 void handleRGBOn()     { handleSwitch(2); }
 void handleRGBOff()    { handleSwitch(3); }
+unsigned long retryDelay = 1000; // Start with 1 second
+const unsigned long maxRetryDelay = 32000; // Cap at 32 seconds
 
+
+bool connectToServer() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(apSSID, apPSK);
+
+    printf("Connecting to WiFi...\n");
+    unsigned long startAttemptTime = millis();
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < retryDelay) {
+        delay(500);
+        printf(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        printf("\nConnected to WiFi. IP Address: %s\n", WiFi.localIP().toString().c_str());
+        retryDelay = 1000; // Reset delay after successful connection
+        isConnected = true;
+
+        // Register with the server
+        registerWithServer();
+        return true;
+    } else {
+        retryDelay = min(retryDelay * 2, maxRetryDelay); // Exponential backoff
+        printf("\nFailed to connect. Retrying in %lu ms...\n", retryDelay);
+        return false;
+    }
+}
+
+void WiFiEvent(WiFiEvent_t event) {
+    switch (event) {
+        case WIFI_EVENT_STA_DISCONNECTED:
+            isConnected = false;
+            printf("WiFi disconnected. Attempting to reconnect...\n");
+            break;
+        case WIFI_EVENT_STA_CONNECTED:
+            printf("WiFi connected. Waiting for IP...\n");
+            break;
+        case IP_EVENT_STA_GOT_IP:
+            printf("WiFi connected with IP: %s\n", WiFi.localIP().toString().c_str());
+            isConnected = true;
+            retryDelay = 1000; // Reset retry delay
+            registerWithServer();
+            break;
+        default:
+            break;
+    }
+}
 
 void WIFI_Init()
 {
-
     // The name and password of the WiFi access point
     String ssid = apSSID;            
     String password = apPSK;            
@@ -418,21 +514,10 @@ void WIFI_Init()
         delay(100);
         printf("AP Mode - IP Address: %s\n", myIP.toString().c_str());
     } else {
-     // Client Mode
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(apSSID, apPSK); // Replace with network credentials
-
-        printf("Connecting to WiFi...\n");
-        while (WiFi.status() != WL_CONNECTED) {
-            delay(1000);
-            printf(".");
-        }
-
-        printf("\nConnected to WiFi. IP Address: %s\n", WiFi.localIP().toString().c_str());
-
-        // Register with the server
-        registerWithServer();
-    }
+      // Client Mode
+      WiFi.onEvent(WiFiEvent); // Attach the event handler
+      connectToServer();
+  }
 
   server.on("/"           ,handleRoot);        
   server.on("/getData"    , handleGetData);
@@ -442,7 +527,8 @@ void WIFI_Init()
   server.on("/RGBOff"     , handleRGBOff);
   server.on("/heartbeat"  , handleHeartbeat);
   server.on("/clear", handleClearStrings);
-  server.on("/deleteSelected", HTTP_POST, handleDeleteSelected);
+  server.on("/deleteSelected", handleDeleteSelected);
+  server.on("/resetPlayCount", handleResetPlayCount);
 
 
   // Endpoint to retrieve pre-made strings
@@ -468,6 +554,12 @@ void WIFI_Loop() {
     unsigned long currentMillis = millis();
 
     if (!isAPMode) {
+          if (!isConnected) {
+                if (connectToServer()) {
+                    printf("Reconnected successfully.\n");
+                }
+            }
+      
         // Client Mode: Send heartbeat at intervals
         if (currentMillis - lastHeartbeat >= heartbeatInterval) {
             lastHeartbeat = currentMillis;

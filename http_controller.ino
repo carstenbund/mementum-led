@@ -14,6 +14,8 @@ String sentStrings[MAX_SENT_STRINGS];
 int sentIndex = 0;
 int sentCount = 0;
 
+int max_plays = 3;
+
 char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Hello World",
     "Temperature: 25C",
@@ -27,6 +29,10 @@ int currentStringIndex = 0;
 char currentStringBuffer[100] = {0};
 bool isDisplaying = false;
 volatile bool Flow_Flag = false; // Flow flag for display logic
+
+// Define sentStrings, sentIndex, sentCount, and playCount
+int playCount[MAX_SENT_STRINGS] = {0}; // Tracks how many times each string has been displayed
+
 
 // Function to load configuration from SPIFFS (config.csv)
 void loadConfigFromCSV() {
@@ -60,6 +66,8 @@ void loadConfigFromCSV() {
                 isAPMode = (value == "true");
             } else if (key == "matrix_rotation") {
                 matrix_rotation = value.toInt();
+            } else if (key == "max_plays") {
+                 max_plays = value.toInt();
             } else if (key == "initialText") {
                 value.toCharArray(Text, sizeof(Text));
             } else {
@@ -104,8 +112,9 @@ void loop() {
     WIFI_Loop();
     Display_Loop();
 }
+unsigned long lastExpiredMessageTime = 0; // Tracks the last time the expired message was shown
+const unsigned long expiredMessageInterval = 5000; // Minimum interval for showing the expired message (5 seconds)
 
-// Display loop function
 void Display_Loop() {
     if (sentCount == 0) {
         // No strings to display
@@ -113,24 +122,48 @@ void Display_Loop() {
     }
 
     if (!isDisplaying) {
-        // Start displaying the current string
-        String str = sentStrings[currentStringIndex];
-        str.toCharArray(currentStringBuffer, sizeof(currentStringBuffer));
-        isDisplaying = true;
-        Flow_Flag = false; // Reset the flag
-        //printf("Displaying string: %s\r\n", currentStringBuffer);
+        // Find the next valid string to display
+        int startIndex = currentStringIndex;
+        bool foundValidString = false;
+
+        do {
+            if (playCount[currentStringIndex] < max_plays) {
+                // Start displaying the current string
+                String str = sentStrings[currentStringIndex];
+                str.toCharArray(currentStringBuffer, sizeof(currentStringBuffer));
+                isDisplaying = true;
+                Flow_Flag = false;
+                foundValidString = true;
+                break;
+            } else {
+                // Skip strings that have expired
+                currentStringIndex = (currentStringIndex + 1) % sentCount;
+            }
+        } while (currentStringIndex != startIndex);
+
+        // If all strings are expired, limit the message frequency
+        if (!foundValidString) {
+            unsigned long currentMillis = millis();
+            if (currentMillis - lastExpiredMessageTime >= expiredMessageInterval) {
+                //printf("All strings have expired.\n");
+                lastExpiredMessageTime = currentMillis;
+            }
+            return;
+        }
     }
 
     if (isDisplaying) {
         Text_Flow(currentStringBuffer); // Display the current string
 
-        // Check if the string has finished displaying
         if (Flow_Flag) {
+            // Mark the string as displayed once
+            playCount[currentStringIndex]++;
+
             // Move to the next string
             currentStringIndex = (currentStringIndex + 1) % sentCount;
-            isDisplaying = false; // Ready to display the next string
-            Flow_Flag = false;    // Reset the flag
-            //printf("Finished displaying string. Moving to next string.\n");
+            isDisplaying = false;
+            Flow_Flag = false;
         }
     }
 }
+

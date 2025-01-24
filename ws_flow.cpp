@@ -85,7 +85,7 @@ void Matrix_Init() {
 void Text_Flow(char* Text) {
   static unsigned long lastUpdate = 0;
   unsigned long currentMillis = millis();
-  const unsigned long updateInterval = 70; // Adjust as needed for scroll speed
+  const unsigned long updateInterval = 120; // Adjust as needed for scroll speed
 
   if (currentMillis - lastUpdate >= updateInterval) {
     lastUpdate = currentMillis;
