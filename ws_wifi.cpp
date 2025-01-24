@@ -362,6 +362,8 @@ void handleClearStrings() {
     else { printf("clear local\n"); }
     clearSentStrings(); // Clear the local buffer
     Text[0] = '\0';
+    isDisplaying = false;
+    Flow_Flag = false;
     Matrix.fillScreen(0);
     Matrix.show();
     server.send(200, "text/plain", "Sent strings cleared and broadcasted.");
@@ -416,6 +418,7 @@ void handleSwitch(uint8_t ledNumber) {
         }
       }
       Flow_Flag = true;
+      isDisplaying = false;
       printf("Text=%s.\r\n",Text);
       break;
     case 2:
