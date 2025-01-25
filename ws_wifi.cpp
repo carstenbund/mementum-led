@@ -343,8 +343,8 @@ void clearSentStrings() {
     // Reset all strings in the array
     for (int i = 0; i < MAX_SENT_STRINGS; i++) {
         sentStrings[i] = ""; // Clear the string
+        playCount[i] = 0; // Reset play counts
     }
-
     // Reset the index and count
     sentIndex = 0;
     sentCount = 0;
@@ -364,6 +364,7 @@ void handleClearStrings() {
     Text[0] = '\0';
     isDisplaying = false;
     Flow_Flag = false;
+    currentStringBuffer[100] = {0};
     Matrix.fillScreen(0);
     Matrix.show();
     server.send(200, "text/plain", "Sent strings cleared and broadcasted.");
@@ -378,7 +379,7 @@ void handleSendData() {
         handleSwitch(1); 
         if (isAPMode) {
             // Only broadcast in server mode
-            printf("Broadcasting command: %s\n", newData.c_str());
+            //printf("Broadcasting command: %s\n", newData.c_str());
             broadcastCommand(newData);
         } else {
             printf("Skipping broadcast; device is in client mode.\n");

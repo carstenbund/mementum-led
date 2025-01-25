@@ -7,7 +7,14 @@
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
 
-char Text[100] = "UNANGEBRACHT";
+char Text[100] = "NEWNOTNEW";
+
+// Display-related global variables
+int currentStringIndex = 0;
+char currentStringBuffer[100] = {0};
+bool isDisplaying = false;
+volatile bool Flow_Flag = false; // Flow flag for display logic
+
 
 // Define sentStrings, sentIndex, sentCount
 String sentStrings[MAX_SENT_STRINGS];
@@ -24,15 +31,8 @@ char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Action: Start"
 };
 
-// Display-related global variables
-int currentStringIndex = 0;
-char currentStringBuffer[100] = {0};
-bool isDisplaying = false;
-volatile bool Flow_Flag = false; // Flow flag for display logic
-
 // Define sentStrings, sentIndex, sentCount, and playCount
 int playCount[MAX_SENT_STRINGS] = {0}; // Tracks how many times each string has been displayed
-
 
 // Function to load configuration from SPIFFS (config.csv)
 void loadConfigFromCSV() {
@@ -117,7 +117,9 @@ const unsigned long expiredMessageInterval = 5000; // Minimum interval for showi
 
 void Display_Loop() {
     if (sentCount == 0) {
-        // No strings to display
+        // Reset flags if no strings are available
+        isDisplaying = false;
+        Flow_Flag = false;
         return;
     }
 
@@ -136,19 +138,13 @@ void Display_Loop() {
                 foundValidString = true;
                 break;
             } else {
-                // Skip strings that have expired
+                // Skip expired strings
                 currentStringIndex = (currentStringIndex + 1) % sentCount;
             }
         } while (currentStringIndex != startIndex);
 
-        // If all strings are expired, limit the message frequency
         if (!foundValidString) {
-            unsigned long currentMillis = millis();
-            if (currentMillis - lastExpiredMessageTime >= expiredMessageInterval) {
-                //printf("All strings have expired.\n");
-                lastExpiredMessageTime = currentMillis;
-            }
-            return;
+            return; // All strings are expired
         }
     }
 
@@ -156,14 +152,10 @@ void Display_Loop() {
         Text_Flow(currentStringBuffer); // Display the current string
 
         if (Flow_Flag) {
-            // Mark the string as displayed once
             playCount[currentStringIndex]++;
-
-            // Move to the next string
             currentStringIndex = (currentStringIndex + 1) % sentCount;
             isDisplaying = false;
             Flow_Flag = false;
         }
     }
 }
-

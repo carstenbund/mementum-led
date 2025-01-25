@@ -9,6 +9,7 @@
 
 extern char Text[100];
 //extern uint8_t Flow_Flag;
+extern bool isDisplaying;
 extern volatile bool Flow_Flag; 
 // Global variable to manage scrolling
 extern int MatrixWidth;

@@ -83,24 +83,34 @@ void Matrix_Init() {
 }
 
 void Text_Flow(char* Text) {
-  static unsigned long lastUpdate = 0;
-  unsigned long currentMillis = millis();
-  const unsigned long updateInterval = 120; // Adjust as needed for scroll speed
+    static unsigned long lastUpdate = 0;
+    unsigned long currentMillis = millis();
+    const unsigned long updateInterval = 120; // Adjust as needed for scroll speed
 
-  if (currentMillis - lastUpdate >= updateInterval) {
-    lastUpdate = currentMillis;
-    filterString(Text, Text);
-    int textWidth = getStringWidth(Text);
-    Matrix.fillScreen(0);                       
-    Matrix.setCursor(MatrixWidth, 0);
-    Matrix.print(F(Text));                      
-    Matrix.show();
-
-    //printf("MatrixWidth: %d\r\n", MatrixWidth);
-    if (--MatrixWidth < -textWidth) {      
-      MatrixWidth = Matrix.width();
-      Flow_Flag = true; // Indicate that the string has finished displaying
-      //printf("Flow_Flag set to true\n");
+    if (Text == nullptr || strlen(Text) == 0) {
+        printf("Empty or null Text passed to Text_Flow.\n");
+        isDisplaying = false;
+        return; // No action needed for empty text
     }
-  }
+
+    if (currentMillis - lastUpdate >= updateInterval) {
+        lastUpdate = currentMillis;
+
+        // Apply any necessary filtering to the text
+        filterString(Text, Text);
+        int textWidth = getStringWidth(Text);
+
+        // Clear the screen and prepare to display the text
+        Matrix.fillScreen(0);
+        Matrix.setCursor(MatrixWidth, 0);
+        Matrix.print(F(Text));
+        Matrix.show();
+
+        // Check if the text has finished scrolling
+        if (--MatrixWidth < -textWidth) {
+            MatrixWidth = Matrix.width(); // Reset position
+            Flow_Flag = true; // Indicate completion
+            printf("Flow_Flag set to true. Scrolling complete for text: %s\n", Text);
+        }
+    }
 }

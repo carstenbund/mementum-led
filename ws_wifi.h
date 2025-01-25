@@ -14,6 +14,7 @@
 
 extern volatile bool Flow_Flag;
 extern char Text[100];
+extern char currentStringBuffer[100];
 
 extern char apSSID[64];
 extern char apPSK[64];
@@ -26,7 +27,7 @@ extern String sentStrings[MAX_SENT_STRINGS];
 extern int sentCount;
 extern int sentIndex;
 
-#define MAX_TEXT_LENGTH 50
+#define MAX_TEXT_LENGTH 100
 #define PREMADE_COUNT 8
 extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
 
