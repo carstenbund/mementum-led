@@ -47,6 +47,7 @@ void filterString(char input[], char output[]);
 void colorWipe(uint32_t c, uint8_t wait);
 int getCharWidth(char c);
 int getStringWidth(const char* str);
-void Text_Flow(char* Text);
+//void Text_Flow(char* Text);
+int Text_Flow(char* Text);
 void Matrix_Init();       
 #endif

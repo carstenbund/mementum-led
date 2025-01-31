@@ -450,7 +450,7 @@ bool connectToServer() {
     unsigned long startAttemptTime = millis();
 
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < retryDelay) {
-        delay(500);
+        delay(1000);
         printf(".");
     }
 
@@ -488,6 +488,14 @@ void WiFiEvent(WiFiEvent_t event) {
             break;
     }
 }
+
+void webServerTask(void *params) {
+    while (true) {
+        server.handleClient(); // Process HTTP requests
+        vTaskDelay(pdMS_TO_TICKS(10)); // Yield to other tasks (adjust delay as needed)
+    }
+}
+
 
 void WIFI_Init()
 {
@@ -550,10 +558,21 @@ void WIFI_Init()
 
   server.begin(); 
   printf("Web server started\r\n");
+
+   // Create the web server task
+    xTaskCreate(
+        webServerTask,        // Task function
+        "WebServerTask",      // Task name
+        4096,                 // Stack size
+        NULL,                 // Parameters
+        1,                    // Priority
+        NULL                  // Task handle
+    );
+    
 }
 
 void WIFI_Loop() {
-    server.handleClient(); // Process incoming HTTP requests
+    //server.handleClient(); // Process incoming HTTP requests
 
     unsigned long currentMillis = millis();
 

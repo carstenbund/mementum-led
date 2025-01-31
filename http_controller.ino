@@ -4,14 +4,18 @@
 #include <FS.h>
 #include <SPIFFS.h>
 
+char Project[20] = "mementumLED";
+char Version[20] = "1.2";
+
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
 
-char Text[100] = "NEWNOTNEW";
+char Text[100] = "mementum";
 
 // Display-related global variables
 int currentStringIndex = 0;
 char currentStringBuffer[100] = {0};
+
 bool isDisplaying = false;
 volatile bool Flow_Flag = false; // Flow flag for display logic
 
@@ -91,6 +95,51 @@ void loadConfigFromCSV() {
     }
 }
 
+void displayTextTask(void *parameters) {
+    char *text = (char *)parameters;
+
+    // Loop until the text scrolling is complete
+    while (Text_Flow(text) != 0) {
+        // Allow other tasks to run
+         vTaskDelay(pdMS_TO_TICKS(10));  // Allow lower-priority tasks to run and avoid CPU starvation
+    }
+
+    // Clear the display once scrolling is complete
+    Matrix.fillScreen(0);
+    Matrix.show();
+
+    // Clean up and delete the task
+    delete[] text;  // Free the allocated memory for the text
+    vTaskDelete(NULL);
+}
+
+
+void displayText(const char *text) {
+    // Allocate memory for the text to pass it to the task
+    char *taskText = new char[strlen(text) + 1];
+    strcpy(taskText, text);
+
+    // Create the FreeRTOS task
+    xTaskCreate(
+        displayTextTask,  // Task function
+        "DisplayTextTask",// Name of the task
+        4096,             // Stack size
+        taskText,         // Task parameters (text to display)
+        1,                // Priority
+        NULL              // Task handle
+    );
+}
+
+
+void xdisplayText(char* text){
+  while(Text_Flow(text) !=0 ){
+      yield();
+    }
+    Matrix.fillScreen(0);
+    Matrix.show();
+}
+
+
 // Setup function
 void setup() {
     delay(1000);
@@ -105,6 +154,12 @@ void setup() {
     delay(1000);
     // Initialize RGB Matrix
     Matrix_Init();
+    clearSentStrings();
+    if (isAPMode){
+      displayText("  mementumLED server 1.2");
+    } else{
+      displayText("  mementumLED client 1.2");
+    }
 }
 
 // Main loop
@@ -116,10 +171,9 @@ unsigned long lastExpiredMessageTime = 0; // Tracks the last time the expired me
 const unsigned long expiredMessageInterval = 5000; // Minimum interval for showing the expired message (5 seconds)
 
 void Display_Loop() {
-    if (sentCount == 0) {
-        // Reset flags if no strings are available
-        isDisplaying = false;
-        Flow_Flag = false;
+    if (sentCount == 0){
+        yield();
+        delay(100);
         return;
     }
 
@@ -129,7 +183,7 @@ void Display_Loop() {
         bool foundValidString = false;
 
         do {
-            if (playCount[currentStringIndex] < max_plays) {
+             if (playCount[currentStringIndex] < max_plays) {
                 // Start displaying the current string
                 String str = sentStrings[currentStringIndex];
                 str.toCharArray(currentStringBuffer, sizeof(currentStringBuffer));
@@ -144,18 +198,26 @@ void Display_Loop() {
         } while (currentStringIndex != startIndex);
 
         if (!foundValidString) {
+          // Yield and delay at the end to allow other tasks to run
+            yield();
+            delay(10);
             return; // All strings are expired
         }
     }
 
     if (isDisplaying) {
-        Text_Flow(currentStringBuffer); // Display the current string
 
-        if (Flow_Flag) {
-            playCount[currentStringIndex]++;
-            currentStringIndex = (currentStringIndex + 1) % sentCount;
-            isDisplaying = false;
-            Flow_Flag = false;
-        }
-    }
+        
+    if (Text_Flow(currentStringBuffer) == 0) {
+        // Increment the play count and move to the next string
+        playCount[currentStringIndex]++;
+        currentStringIndex = (currentStringIndex + 1) % sentCount;
+        isDisplaying = false;
+        Flow_Flag = false;
+     }
+
+   }
+    // Yield and delay at the end to allow other tasks to run
+    yield();
+    delay(10);
 }

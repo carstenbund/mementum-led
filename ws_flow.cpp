@@ -52,7 +52,7 @@ void colorWipe(uint32_t c, uint8_t wait) {
 
 int getCharWidth(char c) {
   if (c == 'i' || c == 'l' || c == '!' || c == '.') {
-    return 3;
+    return 4;
   // } else if (c == 'm' || c == 'w') {
   //   return 7;
   } else {
@@ -82,7 +82,46 @@ void Matrix_Init() {
   Matrix.setRotation(matrix_rotation);
 }
 
-void Text_Flow(char* Text) {
+int Text_Flow(char* Text) {
+    static unsigned long lastUpdate = 0;
+    static int MatrixWidth = 0; // Track scrolling position
+    unsigned long currentMillis = millis();
+    const unsigned long updateInterval = 120; // Adjust as needed for scroll speed
+
+    if (Text == nullptr || strlen(Text) == 0) {
+        printf("Empty or null Text passed to Text_Flow.\n");
+        yield();
+        delay(100);
+        return 0; // No action needed, indicate completion
+    }
+
+    if (currentMillis - lastUpdate >= updateInterval) {
+        lastUpdate = currentMillis;
+
+        // Apply any necessary filtering to the text
+        filterString(Text, Text);
+        int textWidth = getStringWidth(Text) +2;
+
+        // Clear the screen and prepare to display the text
+        Matrix.fillScreen(0);
+        Matrix.setCursor(MatrixWidth, 0);
+        Matrix.print(F(Text));
+        Matrix.show();
+
+        // Check if the text has finished scrolling
+        if (--MatrixWidth < -textWidth) {
+            MatrixWidth = Matrix.width(); // Reset position
+            Flow_Flag = true; // Indicate completion
+            printf("Flow_Flag set to true. Scrolling complete for text: %s\n", Text);
+            return 0;
+        }
+    }
+
+    return 1; // Indicate scrolling in progress
+}
+
+
+void xText_Flow(char* Text) {
     static unsigned long lastUpdate = 0;
     unsigned long currentMillis = millis();
     const unsigned long updateInterval = 120; // Adjust as needed for scroll speed
@@ -90,6 +129,10 @@ void Text_Flow(char* Text) {
     if (Text == nullptr || strlen(Text) == 0) {
         printf("Empty or null Text passed to Text_Flow.\n");
         isDisplaying = false;
+        Flow_Flag = false;
+        // Yield and delay at the end to allow other tasks to run
+        yield();
+        delay(100);
         return; // No action needed for empty text
     }
 

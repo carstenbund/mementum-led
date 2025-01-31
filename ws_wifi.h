@@ -38,6 +38,7 @@ extern bool isDisplaying;
 
 extern Adafruit_NeoMatrix Matrix;
 
+void clearSentStrings();
 void handleRoot();
 void handleGetData();
 void handleSwitch(uint8_t ledNumber);
