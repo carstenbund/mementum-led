@@ -1,5 +1,5 @@
-# esp32-matrix-group
-Group of Matrix share text to display
+# Mementum LED
+Group of ESP32-Matrix share text to display
 
 This project aims to build a networked swarm of wearable devices, displaying syncronized messages. 
 
