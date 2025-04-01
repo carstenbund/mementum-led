@@ -1,8 +1,8 @@
-APSSID,unangebracht
-APPSK,unangebracht
+APSSID,mementumLED
+APPSK,mementumLED
 isAPMode,false
 matrix_rotation,0
-initialText,unangebracht
+initialText,das ist unangebracht
 predefText1,$
 predefText2,:)
 predefText3,*
