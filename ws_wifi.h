@@ -37,6 +37,15 @@ extern bool isDisplaying;
 
 extern Adafruit_NeoMatrix Matrix;
 
+// ---- Time-synchronized display (Model A) ----
+extern bool clockSynced;   // client: true once the server clock offset is known
+extern uint32_t globalSeq; // server: monotonic schedule sequence number
+
+void syncClock();          // client: estimate the server-clock offset
+void handleTime();         // route: return our millis() as the clock reference
+void handlePlay();         // route: client receives a timed display command
+void broadcastPlay(uint32_t seq, const String &text, uint32_t displayAt); // server -> clients
+
 void clearSentStrings();
 void handleRoot();
 void handleGetData();

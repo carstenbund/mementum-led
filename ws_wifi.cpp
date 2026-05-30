@@ -20,6 +20,19 @@ const unsigned long CLEANUP_INTERVAL = 30000;  // Cleanup interval (30 seconds)
 
 int clientId = -1; // Client's assigned ID from the server
 
+// ---- Shared clock (Model A) ----
+// serverNow() returns time in the server's millis() domain. On the server the offset is
+// 0; clients estimate it from the server via syncClock(). All scheduling/rendering uses
+// this single domain so devices stay phase-locked.
+int32_t clockOffset = 0;
+bool clockSynced = false;
+
+uint32_t serverNow() {
+    return millis() + (uint32_t)clockOffset;
+}
+
+uint32_t globalSeq = 0; // monotonic schedule sequence number (server side)
+
 struct registeredClient {
     IPAddress ip;
     int id;
@@ -123,6 +136,17 @@ void broadcastCommand(const String &command, int repeat = 1, unsigned long timec
 }
 
 
+// Server -> clients: schedule a message to start scrolling at displayAt (server clock).
+// The whole query (including url-encoded text) is prebuilt into the route so it rides the
+// generic broadcast path.
+void broadcastPlay(uint32_t seq, const String &text, uint32_t displayAt) {
+    String route = "/play?seq=" + String((unsigned long)seq) +
+                   "&at=" + String((unsigned long)displayAt) +
+                   "&data=" + urlEncode(text);
+    broadcastCommand("", 1, displayAt, route);
+}
+
+
 void registerWithServer() {
     HTTPClient http;
     String registerEndpoint = serverAddress + "/register";
@@ -145,6 +169,45 @@ void registerWithServer() {
     }
 
     http.end();
+}
+
+// Estimate the server-clock offset using Cristian's algorithm. Takes a few samples and
+// keeps the one with the smallest round-trip time (least uncertainty).
+void syncClock() {
+    if (serverAddress.isEmpty() || !isConnected) {
+        return;
+    }
+
+    int32_t bestOffset = 0;
+    uint32_t bestRtt = UINT32_MAX;
+
+    for (int i = 0; i < 3; i++) {
+        HTTPClient http;
+        http.setConnectTimeout(2000);
+        http.setTimeout(2000);
+        uint32_t t0 = millis();
+        http.begin(serverAddress + "/time");
+        int httpCode = http.GET();
+        if (httpCode >= 200 && httpCode < 300) {
+            uint32_t serverMs = (uint32_t)strtoul(http.getString().c_str(), nullptr, 10);
+            uint32_t t1 = millis();
+            uint32_t rtt = t1 - t0;
+            if (rtt < bestRtt) {
+                bestRtt = rtt;
+                // Estimated server time at t1 is serverMs + rtt/2; offset = that - local t1.
+                bestOffset = (int32_t)(serverMs + rtt / 2 - t1);
+            }
+        }
+        http.end();
+    }
+
+    if (bestRtt != UINT32_MAX) {
+        clockOffset = bestOffset;
+        clockSynced = true;
+        printf("Clock synced. offset=%ld ms, rtt=%lu ms\n", (long)clockOffset, (unsigned long)bestRtt);
+    } else {
+        printf("Clock sync failed (no /time response).\n");
+    }
 }
 
 
@@ -262,12 +325,9 @@ void handleDeleteSelected() {
     if (server.hasArg("indexes")) {
         String indexesArg = server.arg("indexes");
 
-        // Mirror the delete to clients so their queues stay aligned with the server.
-        if (isAPMode) {
-            String deleteURL = "/deleteSelected?indexes=" + indexesArg;
-            printf("Broadcasting command: %s\n", deleteURL.c_str());
-            broadcastCommand("", 1, millis(), deleteURL);
-        }
+        // Model A: the queue is server-owned. Clients are stateless players that only
+        // show scheduled /play items, so no client broadcast is needed here — deleting
+        // an entry simply means the sequencer won't schedule it again.
 
         int indexes[MAX_SENT_STRINGS];
         int count = 0;
@@ -315,14 +375,7 @@ void handleDeleteSelected() {
 void handleResetPlayCount() {
     bool anyPlayCountReset = false; // Track if any play count is reset
     if (server.hasArg("indexes")) {
-        String playIndexes = server.arg("indexes");
-        // server
-        if (isAPMode) {
-              // Only broadcast in server mode
-              String replayURL = "/resetPlayCount?indexes=" + playIndexes;
-              printf("Broadcasting command: %s\n", replayURL.c_str());
-              broadcastCommand("", 1, millis(), replayURL);
-        }
+        // Model A: play counts gate the server-side sequencer only; no client broadcast.
         // Parse the "indexes" query parameter (e.g., "0,2,4")
         String indexesArg = server.arg("indexes");
         std::vector<int> indexes;
@@ -400,7 +453,8 @@ void clearSentStrings() {
 
 void handleClearStrings() {
     if (isAPMode) {
-            // Only broadcast in server mode
+            // Tell clients to stop immediately so they blank instead of finishing the
+            // currently-scheduled scroll.
             printf("Broadcasting command: clear\n");
             broadcastCommand("", 1, millis(), "/clear");
     }
@@ -409,7 +463,8 @@ void handleClearStrings() {
     Text[0] = '\0';
     isDisplaying = false;
     Flow_Flag = false;
-    currentStringBuffer[100] = {0};
+    currentSchedule.active = false; // drop any in-flight scheduled message
+    currentStringBuffer[0] = '\0';  // (was an out-of-bounds write at index 100)
     Matrix.fillScreen(0);
     Matrix.show();
     server.send(200, "text/plain", "Sent strings cleared and broadcasted.");
@@ -422,20 +477,38 @@ void handleSendData() {
         return;
     }
 
-    String newData = server.arg("data");
-
-    // Process the command locally. handleSwitch(1) stores the text and sends the
+    // Add to the (server-owned) queue. handleSwitch(1) stores the text and sends the
     // single HTTP response ("OK"); do not send again here or the WebServer logs a
     // "response already sent" error on every message.
+    //
+    // Model A: we do NOT broadcast the raw text to clients here. The server's sequencer
+    // distributes each message as a timed /play command (broadcastPlay) so all devices
+    // start the same message at the same instant.
     handleSwitch(1);
-
-    if (isAPMode) {
-        broadcastCommand(newData);
-    } else {
-        printf("Skipping broadcast; device is in client mode.\n");
-    }
 }
 
+
+// Reference clock for clients: just our current millis().
+void handleTime() {
+    server.send(200, "text/plain", String((unsigned long)millis()));
+}
+
+// Client-side: receive a timed display command and (re)schedule it. Idempotent on seq.
+void handlePlay() {
+    if (!server.hasArg("seq") || !server.hasArg("data") || !server.hasArg("at")) {
+        server.send(400, "text/plain", "Missing play parameters.");
+        return;
+    }
+    uint32_t seq = (uint32_t)strtoul(server.arg("seq").c_str(), nullptr, 10);
+    uint32_t at  = (uint32_t)strtoul(server.arg("at").c_str(), nullptr, 10);
+
+    if (!currentSchedule.active || seq != currentSchedule.seq) {
+        setSchedule(seq, server.arg("data").c_str(), at);
+        printf("Scheduled seq=%lu at=%lu now=%lu\n",
+               (unsigned long)seq, (unsigned long)at, (unsigned long)serverNow());
+    }
+    server.send(200, "text/plain", "OK");
+}
 
 void handleGetData() {
   // Entries are stored compactly at [0, sentCount); this is also the display order.
@@ -499,8 +572,9 @@ bool connectToServer() {
         retryDelay = 1000; // Reset delay after successful connection
         isConnected = true;
 
-        // Register with the server
+        // Register with the server and sync the shared clock
         registerWithServer();
+        syncClock();
         return true;
     } else {
         retryDelay = min(retryDelay * 2, maxRetryDelay); // Exponential backoff
@@ -523,6 +597,7 @@ void WiFiEvent(WiFiEvent_t event) {
             isConnected = true;
             retryDelay = 1000; // Reset retry delay
             registerWithServer();
+            syncClock();
             break;
         default:
             break;
@@ -581,6 +656,8 @@ void WIFI_Init()
   server.on("/clear", handleClearStrings);
   server.on("/deleteSelected", handleDeleteSelected);
   server.on("/resetPlayCount", handleResetPlayCount);
+  server.on("/time", handleTime);   // shared-clock reference (server) / sync source (client)
+  server.on("/play", handlePlay);   // timed display command received by clients
 
 
   // Endpoint to retrieve pre-made strings
@@ -623,10 +700,13 @@ void WIFI_Loop() {
                 }
             }
       
-        // Client Mode: Send heartbeat at intervals
+        // Client Mode: Send heartbeat at intervals and refresh the clock offset
         if (currentMillis - lastHeartbeat >= heartbeatInterval) {
             lastHeartbeat = currentMillis;
             sendHeartbeat();
+            if (isConnected) {
+                syncClock(); // keep the shared clock from drifting between reconnects
+            }
         }
     } else {
         // AP Mode: Cleanup stale clients at intervals
