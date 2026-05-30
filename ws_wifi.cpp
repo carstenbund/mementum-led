@@ -27,14 +27,19 @@ struct registeredClient {
 };
 
 std::vector<registeredClient> registeredClients;
+int nextClientId = 0; // Monotonic ID counter; never reused, so IDs stay unique after cleanup
 
-struct BroadcastTaskParameters {
-    String command;      // Command to be sent
-    IPAddress clientIP;  // Client's IP address
-    int clientId;        // Client's ID
-    int repeat;          // How many times to run
-    unsigned long timecode; // For scheduling or later use
-    String route;         // Dynamic route for the request
+struct BroadcastTarget {
+    IPAddress ip;
+    int id;
+};
+
+struct BroadcastJob {
+    String command;                      // Command/text to send (only used for /SendData)
+    String route;                        // Dynamic route for the request
+    int repeat;                          // How many times to run
+    unsigned long timecode;              // For scheduling (reserved for time-sync feature)
+    std::vector<BroadcastTarget> targets; // Snapshot of clients at enqueue time
 };
 
 String urlEncode(const String &str) {
@@ -53,58 +58,68 @@ String urlEncode(const String &str) {
     return encodedString;
 }
 
-void sendCommandToClient(void *parameters) {
-    BroadcastTaskParameters *taskParams = (BroadcastTaskParameters *)parameters;
+// Single broadcast task: iterates over the snapshot of clients sequentially.
+// This avoids spawning one 4 KB task per client (heap exhaustion with ~20 clients)
+// and serializes the radio access so failures are visible and bounded.
+void broadcastTask(void *parameters) {
+    BroadcastJob *job = (BroadcastJob *)parameters;
+    String encodedCommand = urlEncode(job->command);
 
-    for (int i = 0; i < taskParams->repeat; i++) {
-        HTTPClient http;
-        String url = "http://" + taskParams->clientIP.toString() + taskParams->route;
-        String encodedCommand = urlEncode(taskParams->command);
-        if (!taskParams->command.isEmpty() && taskParams->route == "/SendData") {
-            url += "?data=" + encodedCommand;
-        }
-        printf("Broadcasting to client ID=%d, URL=%s, Attempt=%d/%d, Timecode=%lu\n",
-               taskParams->clientId, url.c_str(), i + 1, taskParams->repeat, taskParams->timecode);
-        http.begin(url); // Initialize the HTTP request
+    for (int attempt = 0; attempt < job->repeat; attempt++) {
+        for (const auto &target : job->targets) {
+            HTTPClient http;
+            String url = "http://" + target.ip.toString() + job->route;
+            if (!job->command.isEmpty() && job->route == "/SendData") {
+                url += "?data=" + encodedCommand;
+            }
 
-        int httpCode = http.GET(); // Send the GET request
-        if (httpCode > 0) {
-            printf("Command sent to client ID=%d. Response: %s\n",
-                   taskParams->clientId, http.getString().c_str());
-        } else {
-            printf("Failed to send command to client ID=%d. Error: %s\n",
-                   taskParams->clientId, http.errorToString(httpCode).c_str());
+            http.begin(url);
+            // Bound the stall caused by a client that has gone away but not yet been
+            // cleaned up, so one dead client cannot block the whole broadcast.
+            http.setConnectTimeout(2000); // ms to establish the connection
+            http.setTimeout(2000);        // ms to wait for the response
+            int httpCode = http.GET();
+            if (httpCode >= 200 && httpCode < 300) {
+                printf("Broadcast OK to client ID=%d, URL=%s, Attempt=%d/%d\n",
+                       target.id, url.c_str(), attempt + 1, job->repeat);
+            } else {
+                printf("Broadcast FAILED to client ID=%d, URL=%s, code=%d (%s)\n",
+                       target.id, url.c_str(), httpCode, http.errorToString(httpCode).c_str());
+            }
+            http.end();
         }
-        http.end(); // Close the connection
-        if (i < taskParams->repeat - 1) {
+        if (attempt < job->repeat - 1) {
             delay(1000); // Optional delay between repeats
         }
     }
-    delete taskParams; // Clean up allocated memory
+
+    delete job;        // Clean up allocated memory
     vTaskDelete(NULL); // End the task
 }
 
 
-void broadcastCommand(const String &command, int repeat = 1, unsigned long timecode = millis(), const String &route = "/SendData") {
-    for (const auto &client : registeredClients) {
-        BroadcastTaskParameters *taskParams = new BroadcastTaskParameters{
-            command,        // Command
-            client.ip,      // Client IP
-            client.id,      // Client ID
-            repeat,         // Repeat count
-            timecode,       // Timecode
-            route           // Route for the request
-        };
-
-        xTaskCreate(
-            sendCommandToClient,         // Task function
-            "BroadcastTask",             // Name of the task
-            4096,                        // Stack size (in bytes)
-            taskParams,                  // Parameters passed to the task
-            1,                           // Task priority
-            NULL                         // Task handle
-        );
+void broadcastCommand(const String &command, int repeat = 1, unsigned long timecode = 0, const String &route = "/SendData") {
+    if (registeredClients.empty()) {
+        return; // Nothing to broadcast to
     }
+
+    BroadcastJob *job = new BroadcastJob();
+    job->command = command;
+    job->route = route;
+    job->repeat = repeat;
+    job->timecode = timecode;
+    for (const auto &client : registeredClients) {
+        job->targets.push_back({client.ip, client.id});
+    }
+
+    xTaskCreate(
+        broadcastTask,   // Task function
+        "BroadcastTask", // Name of the task
+        8192,            // Stack size (in bytes) - HTTPClient + vector iteration
+        job,             // Parameters passed to the task
+        1,               // Task priority
+        NULL             // Task handle
+    );
 }
 
 
@@ -114,7 +129,7 @@ void registerWithServer() {
     http.begin(registerEndpoint);
 
     int httpCode = http.GET();
-    if (httpCode > 0) {
+    if (httpCode >= 200 && httpCode < 300) {
         String response = http.getString();
         if (response.startsWith("Registered successfully. Your ID: ")) {
             clientId = response.substring(response.lastIndexOf(":") + 2).toInt();
@@ -163,11 +178,12 @@ void handleRegister() {
         [&](const registeredClient &client) { return client.ip == clientIP; });
 
     if (it == registeredClients.end()) {
-        // Assign a new ID based on the vector size
-        int clientId = registeredClients.size();
-        registeredClients.push_back({clientIP, clientId, currentTime});
-        printf("New client registered: ID=%d, IP=%s\r\n", clientId, clientIP.toString().c_str());
-        server.send(200, "text/plain", "Registered successfully. Your ID: " + String(clientId));
+        // Assign a new monotonic ID. Using the vector size would reuse IDs after a
+        // cleanup erases an entry, causing ID collisions and heartbeat mismatches.
+        int newId = nextClientId++;
+        registeredClients.push_back({clientIP, newId, currentTime});
+        printf("New client registered: ID=%d, IP=%s\r\n", newId, clientIP.toString().c_str());
+        server.send(200, "text/plain", "Registered successfully. Your ID: " + String(newId));
     } else {
         // Update timestamp for existing client
         it->timestamp = currentTime;
@@ -177,18 +193,21 @@ void handleRegister() {
 }
 
 void handleHeartbeat() {
-    if (server.hasArg("index")) {
-        int clientId = server.arg("index").toInt();
-        printf("Heartbeat received from client ID: %d\n", clientId);
+    // Identify the client by source IP, not by the reported index. IDs are no longer
+    // equal to the vector position (cleanup can erase middle entries), so indexing the
+    // vector by ID would refresh the wrong client or read out of bounds.
+    IPAddress clientIP = server.client().remoteIP();
+    auto it = std::find_if(registeredClients.begin(), registeredClients.end(),
+        [&](const registeredClient &client) { return client.ip == clientIP; });
 
-        if (clientId >= 0 && clientId < registeredClients.size()) {
-            registeredClients[clientId].timestamp = millis();
-            server.send(200, "text/plain", "Heartbeat acknowledged.");
-        } else {
-            server.send(400, "text/plain", "Invalid client ID.");
-        }
+    if (it != registeredClients.end()) {
+        it->timestamp = millis();
+        printf("Heartbeat from client ID=%d, IP=%s\n", it->id, clientIP.toString().c_str());
+        server.send(200, "text/plain", "Heartbeat acknowledged.");
     } else {
-        server.send(400, "text/plain", "No index provided.");
+        // Unknown client (e.g. it was cleaned up). Tell it to re-register.
+        printf("Heartbeat from unknown IP=%s; requesting re-register\n", clientIP.toString().c_str());
+        server.send(400, "text/plain", "Unknown client. Please re-register.");
     }
 }
 
@@ -207,26 +226,26 @@ void sendHeartbeat() {
     http.begin(heartbeatEndpoint);
     int httpCode = http.GET();
 
-    if (httpCode > 0) {
+    // Only a 2xx response is a real acknowledgement. An HTTP error status (e.g. 400
+    // "Unknown client") is a positive httpCode but means the server dropped us, so we
+    // must drop the connection flag and re-register on the next loop.
+    if (httpCode >= 200 && httpCode < 300) {
         printf("Heartbeat acknowledged: %s\n", http.getString().c_str());
         dynamicHeartbeatInterval = heartbeatInterval; // Reset interval on success
     } else {
-        printf("Heartbeat failed. Error: %s\n", http.errorToString(httpCode).c_str());
+        printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
         dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
+        clientId = -1;        // Force re-registration to get a fresh ID
         isConnected = false;
     }
     http.end();
 }
 
 void cleanupStaleClients() {
+    // Interval gating is handled by the caller (WIFI_Loop). Doing it again here with
+    // the lastCleanup the caller just updated would make this return immediately and
+    // never actually remove anyone.
     unsigned long currentMillis = millis();
-    
-    // Only perform cleanup at intervals
-    if (currentMillis - lastCleanup < CLEANUP_INTERVAL) {
-        return;
-    }
-    printf("Cleanup Stale Clients");
-    lastCleanup = currentMillis;
 
     // Iterate through the registered clients and remove stale ones
     for (auto it = registeredClients.begin(); it != registeredClients.end();) {
@@ -234,7 +253,6 @@ void cleanupStaleClients() {
             printf("Removing stale client: ID=%d, IP=%s\n", it->id, it->ip.toString().c_str());
             it = registeredClients.erase(it); // Remove the stale client
         } else {
-            printf("Cleanup Stale Clients no Timeout %n", it);
             ++it; // Move to the next client
         }
     }
@@ -243,6 +261,14 @@ void cleanupStaleClients() {
 void handleDeleteSelected() {
     if (server.hasArg("indexes")) {
         String indexesArg = server.arg("indexes");
+
+        // Mirror the delete to clients so their queues stay aligned with the server.
+        if (isAPMode) {
+            String deleteURL = "/deleteSelected?indexes=" + indexesArg;
+            printf("Broadcasting command: %s\n", deleteURL.c_str());
+            broadcastCommand("", 1, millis(), deleteURL);
+        }
+
         int indexes[MAX_SENT_STRINGS];
         int count = 0;
 
@@ -253,7 +279,8 @@ void handleDeleteSelected() {
             token = strtok(NULL, ",");
         }
 
-        // Sort indexes in descending order to avoid shifting issues
+        // Sort indexes in descending order so shifting earlier entries does not
+        // invalidate the positions of entries still to be deleted.
         for (int i = 0; i < count - 1; i++) {
             for (int j = i + 1; j < count; j++) {
                 if (indexes[i] < indexes[j]) {
@@ -264,16 +291,17 @@ void handleDeleteSelected() {
             }
         }
 
-        // Delete the strings at the specified indexes
+        // Delete the strings at the specified indexes (compact array, index == display order)
         for (int i = 0; i < count; i++) {
             int idx = indexes[i];
             if (idx >= 0 && idx < sentCount) {
                 for (int j = idx; j < sentCount - 1; j++) {
                     sentStrings[j] = sentStrings[j + 1];
+                    playCount[j] = playCount[j + 1];
                 }
-                sentStrings[sentCount - 1] = ""; // Clear the last entry
+                sentStrings[sentCount - 1] = ""; // Clear the freed last entry
+                playCount[sentCount - 1] = 0;
                 sentCount--;
-                sentIndex = (sentIndex - 1 + MAX_SENT_STRINGS) % MAX_SENT_STRINGS;
             }
         }
 
@@ -339,14 +367,31 @@ void handleResetPlayCount() {
 
 
 
+// Append a string to the compact FIFO queue. When full, drop the oldest entry.
+// Crucially, the new slot's play count is reset to 0 so the message is actually shown
+// (a reused slot would otherwise keep the previous occupant's expired play count).
+void addSentString(const String &s) {
+    if (sentCount < MAX_SENT_STRINGS) {
+        sentStrings[sentCount] = s;
+        playCount[sentCount] = 0;
+        sentCount++;
+    } else {
+        // Full: shift everything left by one (drop oldest) and append at the end.
+        for (int i = 0; i < MAX_SENT_STRINGS - 1; i++) {
+            sentStrings[i] = sentStrings[i + 1];
+            playCount[i] = playCount[i + 1];
+        }
+        sentStrings[MAX_SENT_STRINGS - 1] = s;
+        playCount[MAX_SENT_STRINGS - 1] = 0;
+    }
+}
+
 void clearSentStrings() {
     // Reset all strings in the array
     for (int i = 0; i < MAX_SENT_STRINGS; i++) {
         sentStrings[i] = ""; // Clear the string
         playCount[i] = 0; // Reset play counts
     }
-    // Reset the index and count
-    sentIndex = 0;
     sentCount = 0;
 
     // Debug log
@@ -372,30 +417,31 @@ void handleClearStrings() {
 
 
 void handleSendData() {
-    if (server.hasArg("data")) {
-        String newData = server.arg("data");
-
-        // Process the command locally
-        handleSwitch(1); 
-        if (isAPMode) {
-            // Only broadcast in server mode
-            //printf("Broadcasting command: %s\n", newData.c_str());
-            broadcastCommand(newData);
-        } else {
-            printf("Skipping broadcast; device is in client mode.\n");
-        }
-        server.send(200, "text/plain", "Command received and processed.");
-    } else {
+    if (!server.hasArg("data")) {
         server.send(400, "text/plain", "No data provided.");
+        return;
+    }
+
+    String newData = server.arg("data");
+
+    // Process the command locally. handleSwitch(1) stores the text and sends the
+    // single HTTP response ("OK"); do not send again here or the WebServer logs a
+    // "response already sent" error on every message.
+    handleSwitch(1);
+
+    if (isAPMode) {
+        broadcastCommand(newData);
+    } else {
+        printf("Skipping broadcast; device is in client mode.\n");
     }
 }
 
 
 void handleGetData() {
+  // Entries are stored compactly at [0, sentCount); this is also the display order.
   String json = "[";
   for (int i = 0; i < sentCount; i++) {
-    int index = (sentIndex - sentCount + i + MAX_SENT_STRINGS) % MAX_SENT_STRINGS;
-    json += "\"" + sentStrings[index] + "\"";
+    json += "\"" + sentStrings[i] + "\"";
     if (i < sentCount - 1) {
       json += ",";
     }
@@ -410,13 +456,7 @@ void handleSwitch(uint8_t ledNumber) {
       if (server.hasArg("data")) {
         String newData = server.arg("data");
         newData.toCharArray(Text, sizeof(Text));
-
-        // Store the newData in the sentStrings buffer
-        sentStrings[sentIndex] = newData;
-        sentIndex = (sentIndex + 1) % MAX_SENT_STRINGS;
-        if (sentCount < MAX_SENT_STRINGS) {
-          sentCount++;
-        }
+        addSentString(newData); // Appends and resets that slot's play count
       }
       Flow_Flag = true;
       isDisplaying = false;

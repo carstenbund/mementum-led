@@ -20,9 +20,8 @@ bool isDisplaying = false;
 volatile bool Flow_Flag = false; // Flow flag for display logic
 
 
-// Define sentStrings, sentIndex, sentCount
+// Compact FIFO message queue: valid entries live at [0, sentCount)
 String sentStrings[MAX_SENT_STRINGS];
-int sentIndex = 0;
 int sentCount = 0;
 
 int max_plays = 3;
@@ -35,7 +34,7 @@ char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Action: Start"
 };
 
-// Define sentStrings, sentIndex, sentCount, and playCount
+// Per-entry play counts, parallel to the compact sentStrings queue
 int playCount[MAX_SENT_STRINGS] = {0}; // Tracks how many times each string has been displayed
 
 // Function to load configuration from SPIFFS (config.csv)
@@ -175,6 +174,12 @@ void Display_Loop() {
         yield();
         delay(100);
         return;
+    }
+
+    // The queue can shrink (delete/clear) or shift (overflow) between iterations;
+    // keep the cursor inside the valid range so we never read a stale slot.
+    if (currentStringIndex >= sentCount) {
+        currentStringIndex = 0;
     }
 
     if (!isDisplaying) {

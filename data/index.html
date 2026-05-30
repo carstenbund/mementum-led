@@ -105,8 +105,20 @@
             textData = selectedColor + textData;
             var xhr = new XMLHttpRequest();
             xhr.open('GET', '/SendData?data=' + encodeURIComponent(textData), true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4 && xhr.status === 200) {
+                    fetchSentStrings(); // Refresh only after the server stored it
+                }
+            };
             xhr.send();
-            fetchSentStrings(); // Refresh the sent strings list
+        }
+
+        // RGB On (2) / Off (3) — was referenced by the buttons but never defined.
+        function ledSwitch(n) {
+            var endpoint = (n === 2) ? '/RGBOn' : '/RGBOff';
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', endpoint, true);
+            xhr.send();
         }
 
         function clearText() {
@@ -116,36 +128,38 @@
             xhr.open('GET', '/clear', true);
             xhr.onreadystatechange = function() {
                 if (xhr.readyState === 4 && xhr.status === 200) {
-                    sentStrings = JSON.parse(xhr.responseText);
-                    displaySentStrings();
+                    // /clear returns plain text, not JSON — just re-fetch the list.
+                    fetchSentStrings();
                 }
             };
             xhr.send();
-            fetchSentStrings();
         }
 
         function deleteSelectedEntries() {
             var selectedIndexes = [];
             var checkboxes = document.querySelectorAll('#sentStringsList input[type="checkbox"]');
-            
+
             checkboxes.forEach((checkbox, index) => {
                 if (checkbox.checked) {
                     selectedIndexes.push(index); // Collect the index of checked items
                 }
             });
-            
+
             if (selectedIndexes.length > 0) {
+                // Server reads "indexes" as a query param, not a JSON body.
                 var xhr = new XMLHttpRequest();
-                xhr.open('POST', '/deleteSelected', true);
-                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.open('GET', '/deleteSelected?indexes=' + selectedIndexes.join(','), true);
                 xhr.onreadystatechange = function() {
                     if (xhr.readyState === 4 && xhr.status === 200) {
-                        // Update the sent strings list after deletion
-                        sentStrings = JSON.parse(xhr.responseText);
-                        displaySentStrings();
+                        try {
+                            sentStrings = JSON.parse(xhr.responseText);
+                            displaySentStrings();
+                        } catch (e) {
+                            fetchSentStrings();
+                        }
                     }
                 };
-                xhr.send(JSON.stringify({ indexes: selectedIndexes }));
+                xhr.send();
             } else {
                 alert('No items selected for deletion.');
             }

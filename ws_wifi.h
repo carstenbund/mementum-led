@@ -25,13 +25,12 @@ extern bool isAPMode;
 #define MAX_SENT_STRINGS 5
 extern String sentStrings[MAX_SENT_STRINGS];
 extern int sentCount;
-extern int sentIndex;
 
 #define MAX_TEXT_LENGTH 100
 #define PREMADE_COUNT 8
 extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
 
-// Define sentStrings, sentIndex, sentCount, and playCount
+// Compact FIFO queue state plus per-entry play counts
 extern int playCount[MAX_SENT_STRINGS];
 extern int max_plays;
 extern bool isDisplaying;
