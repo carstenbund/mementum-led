@@ -25,18 +25,26 @@ extern bool isAPMode;
 #define MAX_SENT_STRINGS 5
 extern String sentStrings[MAX_SENT_STRINGS];
 extern int sentCount;
-extern int sentIndex;
 
 #define MAX_TEXT_LENGTH 100
 #define PREMADE_COUNT 8
 extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
 
-// Define sentStrings, sentIndex, sentCount, and playCount
+// Compact FIFO queue state plus per-entry play counts
 extern int playCount[MAX_SENT_STRINGS];
 extern int max_plays;
 extern bool isDisplaying;
 
 extern Adafruit_NeoMatrix Matrix;
+
+// ---- Time-synchronized display (Model A) ----
+extern bool clockSynced;   // client: true once the server clock offset is known
+extern uint32_t globalSeq; // server: monotonic schedule sequence number
+
+void syncClock();          // client: estimate the server-clock offset
+void handleTime();         // route: return our millis() as the clock reference
+void handlePlay();         // route: client receives a timed display command
+void broadcastPlay(uint32_t seq, const String &text, uint32_t displayAt); // server -> clients
 
 void clearSentStrings();
 void handleRoot();

@@ -13,6 +13,74 @@ Adafruit_NeoMatrix Matrix = Adafruit_NeoMatrix(8, 8, RGB_Control_PIN,
 
 int MatrixWidth = 0;
 
+// Currently scheduled message, shared by the sequencer (server) and the player (client).
+DisplaySchedule currentSchedule = { 0, 0, "", 0, 0, -1000000, false };
+
+// Resolve the @color prefix once and copy the remaining text out. Unlike the older
+// filterString(), this always writes the output, even when no prefix matches.
+void applyColorAndStrip(const char* raw, char* out, size_t outSize, uint16_t* colorOut) {
+    String s(raw);
+    for (int i = 0; colorMap[i].prefix != nullptr; i++) {
+        if (s.startsWith(colorMap[i].prefix)) {
+            *colorOut = colorMap[i].color;
+            s.substring(strlen(colorMap[i].prefix)).toCharArray(out, outSize);
+            return;
+        }
+    }
+    *colorOut = WHITE_COLOR; // no prefix -> default color, full text
+    s.toCharArray(out, outSize);
+}
+
+// Publish a new schedule. active is cleared first and set last so a concurrent
+// render (webServerTask vs loop) cannot observe a half-written schedule.
+void setSchedule(uint32_t seq, const char* raw, uint32_t displayAt) {
+    currentSchedule.active = false;
+    currentSchedule.seq = seq;
+    currentSchedule.displayAt = displayAt;
+    applyColorAndStrip(raw, currentSchedule.text, sizeof(currentSchedule.text), &currentSchedule.color);
+    currentSchedule.textWidth = getStringWidth(currentSchedule.text) + 2;
+    currentSchedule.lastStep = -1000000; // force the first frame to draw
+    currentSchedule.active = true;
+}
+
+// Render the scheduled message at the column implied by the shared clock. Because the
+// column is derived from time (not a per-device counter), every device shows the same
+// column at the same instant and recovers from dropped frames automatically.
+bool renderScheduled() {
+    if (!currentSchedule.active) {
+        return false;
+    }
+
+    int32_t elapsed = (int32_t)(serverNow() - currentSchedule.displayAt);
+    int step = (elapsed < 0) ? -1 : (elapsed / SCROLL_INTERVAL_MS);
+
+    if (step == currentSchedule.lastStep) {
+        return true; // same column as last frame; nothing to redraw
+    }
+    currentSchedule.lastStep = step;
+
+    if (elapsed < 0) {
+        Matrix.fillScreen(0); // pre-start lead-in: keep the panel blank
+        Matrix.show();
+        return true;
+    }
+
+    int cursorX = Matrix.width() - step;
+    if (cursorX < -currentSchedule.textWidth) {
+        Matrix.fillScreen(0); // scrolled fully off; finished
+        Matrix.show();
+        currentSchedule.active = false;
+        return false;
+    }
+
+    Matrix.fillScreen(0);
+    Matrix.setTextColor(currentSchedule.color);
+    Matrix.setCursor(cursorX, 0);
+    Matrix.print(currentSchedule.text);
+    Matrix.show();
+    return true;
+}
+
 // Function to set color based on prefix
 void setColor(const String &prefix) {
   for (int i = 0; colorMap[i].prefix != nullptr; i++) {

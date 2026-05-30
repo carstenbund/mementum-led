@@ -20,6 +20,19 @@ const unsigned long CLEANUP_INTERVAL = 30000;  // Cleanup interval (30 seconds)
 
 int clientId = -1; // Client's assigned ID from the server
 
+// ---- Shared clock (Model A) ----
+// serverNow() returns time in the server's millis() domain. On the server the offset is
+// 0; clients estimate it from the server via syncClock(). All scheduling/rendering uses
+// this single domain so devices stay phase-locked.
+int32_t clockOffset = 0;
+bool clockSynced = false;
+
+uint32_t serverNow() {
+    return millis() + (uint32_t)clockOffset;
+}
+
+uint32_t globalSeq = 0; // monotonic schedule sequence number (server side)
+
 struct registeredClient {
     IPAddress ip;
     int id;
@@ -27,14 +40,19 @@ struct registeredClient {
 };
 
 std::vector<registeredClient> registeredClients;
+int nextClientId = 0; // Monotonic ID counter; never reused, so IDs stay unique after cleanup
 
-struct BroadcastTaskParameters {
-    String command;      // Command to be sent
-    IPAddress clientIP;  // Client's IP address
-    int clientId;        // Client's ID
-    int repeat;          // How many times to run
-    unsigned long timecode; // For scheduling or later use
-    String route;         // Dynamic route for the request
+struct BroadcastTarget {
+    IPAddress ip;
+    int id;
+};
+
+struct BroadcastJob {
+    String command;                      // Command/text to send (only used for /SendData)
+    String route;                        // Dynamic route for the request
+    int repeat;                          // How many times to run
+    unsigned long timecode;              // For scheduling (reserved for time-sync feature)
+    std::vector<BroadcastTarget> targets; // Snapshot of clients at enqueue time
 };
 
 String urlEncode(const String &str) {
@@ -53,58 +71,79 @@ String urlEncode(const String &str) {
     return encodedString;
 }
 
-void sendCommandToClient(void *parameters) {
-    BroadcastTaskParameters *taskParams = (BroadcastTaskParameters *)parameters;
+// Single broadcast task: iterates over the snapshot of clients sequentially.
+// This avoids spawning one 4 KB task per client (heap exhaustion with ~20 clients)
+// and serializes the radio access so failures are visible and bounded.
+void broadcastTask(void *parameters) {
+    BroadcastJob *job = (BroadcastJob *)parameters;
+    String encodedCommand = urlEncode(job->command);
 
-    for (int i = 0; i < taskParams->repeat; i++) {
-        HTTPClient http;
-        String url = "http://" + taskParams->clientIP.toString() + taskParams->route;
-        String encodedCommand = urlEncode(taskParams->command);
-        if (!taskParams->command.isEmpty() && taskParams->route == "/SendData") {
-            url += "?data=" + encodedCommand;
-        }
-        printf("Broadcasting to client ID=%d, URL=%s, Attempt=%d/%d, Timecode=%lu\n",
-               taskParams->clientId, url.c_str(), i + 1, taskParams->repeat, taskParams->timecode);
-        http.begin(url); // Initialize the HTTP request
+    for (int attempt = 0; attempt < job->repeat; attempt++) {
+        for (const auto &target : job->targets) {
+            HTTPClient http;
+            String url = "http://" + target.ip.toString() + job->route;
+            if (!job->command.isEmpty() && job->route == "/SendData") {
+                url += "?data=" + encodedCommand;
+            }
 
-        int httpCode = http.GET(); // Send the GET request
-        if (httpCode > 0) {
-            printf("Command sent to client ID=%d. Response: %s\n",
-                   taskParams->clientId, http.getString().c_str());
-        } else {
-            printf("Failed to send command to client ID=%d. Error: %s\n",
-                   taskParams->clientId, http.errorToString(httpCode).c_str());
+            http.begin(url);
+            // Bound the stall caused by a client that has gone away but not yet been
+            // cleaned up, so one dead client cannot block the whole broadcast.
+            http.setConnectTimeout(2000); // ms to establish the connection
+            http.setTimeout(2000);        // ms to wait for the response
+            int httpCode = http.GET();
+            if (httpCode >= 200 && httpCode < 300) {
+                printf("Broadcast OK to client ID=%d, URL=%s, Attempt=%d/%d\n",
+                       target.id, url.c_str(), attempt + 1, job->repeat);
+            } else {
+                printf("Broadcast FAILED to client ID=%d, URL=%s, code=%d (%s)\n",
+                       target.id, url.c_str(), httpCode, http.errorToString(httpCode).c_str());
+            }
+            http.end();
         }
-        http.end(); // Close the connection
-        if (i < taskParams->repeat - 1) {
+        if (attempt < job->repeat - 1) {
             delay(1000); // Optional delay between repeats
         }
     }
-    delete taskParams; // Clean up allocated memory
+
+    delete job;        // Clean up allocated memory
     vTaskDelete(NULL); // End the task
 }
 
 
-void broadcastCommand(const String &command, int repeat = 1, unsigned long timecode = millis(), const String &route = "/SendData") {
-    for (const auto &client : registeredClients) {
-        BroadcastTaskParameters *taskParams = new BroadcastTaskParameters{
-            command,        // Command
-            client.ip,      // Client IP
-            client.id,      // Client ID
-            repeat,         // Repeat count
-            timecode,       // Timecode
-            route           // Route for the request
-        };
-
-        xTaskCreate(
-            sendCommandToClient,         // Task function
-            "BroadcastTask",             // Name of the task
-            4096,                        // Stack size (in bytes)
-            taskParams,                  // Parameters passed to the task
-            1,                           // Task priority
-            NULL                         // Task handle
-        );
+void broadcastCommand(const String &command, int repeat = 1, unsigned long timecode = 0, const String &route = "/SendData") {
+    if (registeredClients.empty()) {
+        return; // Nothing to broadcast to
     }
+
+    BroadcastJob *job = new BroadcastJob();
+    job->command = command;
+    job->route = route;
+    job->repeat = repeat;
+    job->timecode = timecode;
+    for (const auto &client : registeredClients) {
+        job->targets.push_back({client.ip, client.id});
+    }
+
+    xTaskCreate(
+        broadcastTask,   // Task function
+        "BroadcastTask", // Name of the task
+        8192,            // Stack size (in bytes) - HTTPClient + vector iteration
+        job,             // Parameters passed to the task
+        1,               // Task priority
+        NULL             // Task handle
+    );
+}
+
+
+// Server -> clients: schedule a message to start scrolling at displayAt (server clock).
+// The whole query (including url-encoded text) is prebuilt into the route so it rides the
+// generic broadcast path.
+void broadcastPlay(uint32_t seq, const String &text, uint32_t displayAt) {
+    String route = "/play?seq=" + String((unsigned long)seq) +
+                   "&at=" + String((unsigned long)displayAt) +
+                   "&data=" + urlEncode(text);
+    broadcastCommand("", 1, displayAt, route);
 }
 
 
@@ -114,7 +153,7 @@ void registerWithServer() {
     http.begin(registerEndpoint);
 
     int httpCode = http.GET();
-    if (httpCode > 0) {
+    if (httpCode >= 200 && httpCode < 300) {
         String response = http.getString();
         if (response.startsWith("Registered successfully. Your ID: ")) {
             clientId = response.substring(response.lastIndexOf(":") + 2).toInt();
@@ -130,6 +169,45 @@ void registerWithServer() {
     }
 
     http.end();
+}
+
+// Estimate the server-clock offset using Cristian's algorithm. Takes a few samples and
+// keeps the one with the smallest round-trip time (least uncertainty).
+void syncClock() {
+    if (serverAddress.isEmpty() || !isConnected) {
+        return;
+    }
+
+    int32_t bestOffset = 0;
+    uint32_t bestRtt = UINT32_MAX;
+
+    for (int i = 0; i < 3; i++) {
+        HTTPClient http;
+        http.setConnectTimeout(2000);
+        http.setTimeout(2000);
+        uint32_t t0 = millis();
+        http.begin(serverAddress + "/time");
+        int httpCode = http.GET();
+        if (httpCode >= 200 && httpCode < 300) {
+            uint32_t serverMs = (uint32_t)strtoul(http.getString().c_str(), nullptr, 10);
+            uint32_t t1 = millis();
+            uint32_t rtt = t1 - t0;
+            if (rtt < bestRtt) {
+                bestRtt = rtt;
+                // Estimated server time at t1 is serverMs + rtt/2; offset = that - local t1.
+                bestOffset = (int32_t)(serverMs + rtt / 2 - t1);
+            }
+        }
+        http.end();
+    }
+
+    if (bestRtt != UINT32_MAX) {
+        clockOffset = bestOffset;
+        clockSynced = true;
+        printf("Clock synced. offset=%ld ms, rtt=%lu ms\n", (long)clockOffset, (unsigned long)bestRtt);
+    } else {
+        printf("Clock sync failed (no /time response).\n");
+    }
 }
 
 
@@ -163,11 +241,12 @@ void handleRegister() {
         [&](const registeredClient &client) { return client.ip == clientIP; });
 
     if (it == registeredClients.end()) {
-        // Assign a new ID based on the vector size
-        int clientId = registeredClients.size();
-        registeredClients.push_back({clientIP, clientId, currentTime});
-        printf("New client registered: ID=%d, IP=%s\r\n", clientId, clientIP.toString().c_str());
-        server.send(200, "text/plain", "Registered successfully. Your ID: " + String(clientId));
+        // Assign a new monotonic ID. Using the vector size would reuse IDs after a
+        // cleanup erases an entry, causing ID collisions and heartbeat mismatches.
+        int newId = nextClientId++;
+        registeredClients.push_back({clientIP, newId, currentTime});
+        printf("New client registered: ID=%d, IP=%s\r\n", newId, clientIP.toString().c_str());
+        server.send(200, "text/plain", "Registered successfully. Your ID: " + String(newId));
     } else {
         // Update timestamp for existing client
         it->timestamp = currentTime;
@@ -177,18 +256,21 @@ void handleRegister() {
 }
 
 void handleHeartbeat() {
-    if (server.hasArg("index")) {
-        int clientId = server.arg("index").toInt();
-        printf("Heartbeat received from client ID: %d\n", clientId);
+    // Identify the client by source IP, not by the reported index. IDs are no longer
+    // equal to the vector position (cleanup can erase middle entries), so indexing the
+    // vector by ID would refresh the wrong client or read out of bounds.
+    IPAddress clientIP = server.client().remoteIP();
+    auto it = std::find_if(registeredClients.begin(), registeredClients.end(),
+        [&](const registeredClient &client) { return client.ip == clientIP; });
 
-        if (clientId >= 0 && clientId < registeredClients.size()) {
-            registeredClients[clientId].timestamp = millis();
-            server.send(200, "text/plain", "Heartbeat acknowledged.");
-        } else {
-            server.send(400, "text/plain", "Invalid client ID.");
-        }
+    if (it != registeredClients.end()) {
+        it->timestamp = millis();
+        printf("Heartbeat from client ID=%d, IP=%s\n", it->id, clientIP.toString().c_str());
+        server.send(200, "text/plain", "Heartbeat acknowledged.");
     } else {
-        server.send(400, "text/plain", "No index provided.");
+        // Unknown client (e.g. it was cleaned up). Tell it to re-register.
+        printf("Heartbeat from unknown IP=%s; requesting re-register\n", clientIP.toString().c_str());
+        server.send(400, "text/plain", "Unknown client. Please re-register.");
     }
 }
 
@@ -207,26 +289,26 @@ void sendHeartbeat() {
     http.begin(heartbeatEndpoint);
     int httpCode = http.GET();
 
-    if (httpCode > 0) {
+    // Only a 2xx response is a real acknowledgement. An HTTP error status (e.g. 400
+    // "Unknown client") is a positive httpCode but means the server dropped us, so we
+    // must drop the connection flag and re-register on the next loop.
+    if (httpCode >= 200 && httpCode < 300) {
         printf("Heartbeat acknowledged: %s\n", http.getString().c_str());
         dynamicHeartbeatInterval = heartbeatInterval; // Reset interval on success
     } else {
-        printf("Heartbeat failed. Error: %s\n", http.errorToString(httpCode).c_str());
+        printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
         dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
+        clientId = -1;        // Force re-registration to get a fresh ID
         isConnected = false;
     }
     http.end();
 }
 
 void cleanupStaleClients() {
+    // Interval gating is handled by the caller (WIFI_Loop). Doing it again here with
+    // the lastCleanup the caller just updated would make this return immediately and
+    // never actually remove anyone.
     unsigned long currentMillis = millis();
-    
-    // Only perform cleanup at intervals
-    if (currentMillis - lastCleanup < CLEANUP_INTERVAL) {
-        return;
-    }
-    printf("Cleanup Stale Clients");
-    lastCleanup = currentMillis;
 
     // Iterate through the registered clients and remove stale ones
     for (auto it = registeredClients.begin(); it != registeredClients.end();) {
@@ -234,7 +316,6 @@ void cleanupStaleClients() {
             printf("Removing stale client: ID=%d, IP=%s\n", it->id, it->ip.toString().c_str());
             it = registeredClients.erase(it); // Remove the stale client
         } else {
-            printf("Cleanup Stale Clients no Timeout %n", it);
             ++it; // Move to the next client
         }
     }
@@ -243,6 +324,11 @@ void cleanupStaleClients() {
 void handleDeleteSelected() {
     if (server.hasArg("indexes")) {
         String indexesArg = server.arg("indexes");
+
+        // Model A: the queue is server-owned. Clients are stateless players that only
+        // show scheduled /play items, so no client broadcast is needed here — deleting
+        // an entry simply means the sequencer won't schedule it again.
+
         int indexes[MAX_SENT_STRINGS];
         int count = 0;
 
@@ -253,7 +339,8 @@ void handleDeleteSelected() {
             token = strtok(NULL, ",");
         }
 
-        // Sort indexes in descending order to avoid shifting issues
+        // Sort indexes in descending order so shifting earlier entries does not
+        // invalidate the positions of entries still to be deleted.
         for (int i = 0; i < count - 1; i++) {
             for (int j = i + 1; j < count; j++) {
                 if (indexes[i] < indexes[j]) {
@@ -264,16 +351,17 @@ void handleDeleteSelected() {
             }
         }
 
-        // Delete the strings at the specified indexes
+        // Delete the strings at the specified indexes (compact array, index == display order)
         for (int i = 0; i < count; i++) {
             int idx = indexes[i];
             if (idx >= 0 && idx < sentCount) {
                 for (int j = idx; j < sentCount - 1; j++) {
                     sentStrings[j] = sentStrings[j + 1];
+                    playCount[j] = playCount[j + 1];
                 }
-                sentStrings[sentCount - 1] = ""; // Clear the last entry
+                sentStrings[sentCount - 1] = ""; // Clear the freed last entry
+                playCount[sentCount - 1] = 0;
                 sentCount--;
-                sentIndex = (sentIndex - 1 + MAX_SENT_STRINGS) % MAX_SENT_STRINGS;
             }
         }
 
@@ -287,14 +375,7 @@ void handleDeleteSelected() {
 void handleResetPlayCount() {
     bool anyPlayCountReset = false; // Track if any play count is reset
     if (server.hasArg("indexes")) {
-        String playIndexes = server.arg("indexes");
-        // server
-        if (isAPMode) {
-              // Only broadcast in server mode
-              String replayURL = "/resetPlayCount?indexes=" + playIndexes;
-              printf("Broadcasting command: %s\n", replayURL.c_str());
-              broadcastCommand("", 1, millis(), replayURL);
-        }
+        // Model A: play counts gate the server-side sequencer only; no client broadcast.
         // Parse the "indexes" query parameter (e.g., "0,2,4")
         String indexesArg = server.arg("indexes");
         std::vector<int> indexes;
@@ -339,14 +420,31 @@ void handleResetPlayCount() {
 
 
 
+// Append a string to the compact FIFO queue. When full, drop the oldest entry.
+// Crucially, the new slot's play count is reset to 0 so the message is actually shown
+// (a reused slot would otherwise keep the previous occupant's expired play count).
+void addSentString(const String &s) {
+    if (sentCount < MAX_SENT_STRINGS) {
+        sentStrings[sentCount] = s;
+        playCount[sentCount] = 0;
+        sentCount++;
+    } else {
+        // Full: shift everything left by one (drop oldest) and append at the end.
+        for (int i = 0; i < MAX_SENT_STRINGS - 1; i++) {
+            sentStrings[i] = sentStrings[i + 1];
+            playCount[i] = playCount[i + 1];
+        }
+        sentStrings[MAX_SENT_STRINGS - 1] = s;
+        playCount[MAX_SENT_STRINGS - 1] = 0;
+    }
+}
+
 void clearSentStrings() {
     // Reset all strings in the array
     for (int i = 0; i < MAX_SENT_STRINGS; i++) {
         sentStrings[i] = ""; // Clear the string
         playCount[i] = 0; // Reset play counts
     }
-    // Reset the index and count
-    sentIndex = 0;
     sentCount = 0;
 
     // Debug log
@@ -355,7 +453,8 @@ void clearSentStrings() {
 
 void handleClearStrings() {
     if (isAPMode) {
-            // Only broadcast in server mode
+            // Tell clients to stop immediately so they blank instead of finishing the
+            // currently-scheduled scroll.
             printf("Broadcasting command: clear\n");
             broadcastCommand("", 1, millis(), "/clear");
     }
@@ -364,7 +463,8 @@ void handleClearStrings() {
     Text[0] = '\0';
     isDisplaying = false;
     Flow_Flag = false;
-    currentStringBuffer[100] = {0};
+    currentSchedule.active = false; // drop any in-flight scheduled message
+    currentStringBuffer[0] = '\0';  // (was an out-of-bounds write at index 100)
     Matrix.fillScreen(0);
     Matrix.show();
     server.send(200, "text/plain", "Sent strings cleared and broadcasted.");
@@ -372,30 +472,49 @@ void handleClearStrings() {
 
 
 void handleSendData() {
-    if (server.hasArg("data")) {
-        String newData = server.arg("data");
-
-        // Process the command locally
-        handleSwitch(1); 
-        if (isAPMode) {
-            // Only broadcast in server mode
-            //printf("Broadcasting command: %s\n", newData.c_str());
-            broadcastCommand(newData);
-        } else {
-            printf("Skipping broadcast; device is in client mode.\n");
-        }
-        server.send(200, "text/plain", "Command received and processed.");
-    } else {
+    if (!server.hasArg("data")) {
         server.send(400, "text/plain", "No data provided.");
+        return;
     }
+
+    // Add to the (server-owned) queue. handleSwitch(1) stores the text and sends the
+    // single HTTP response ("OK"); do not send again here or the WebServer logs a
+    // "response already sent" error on every message.
+    //
+    // Model A: we do NOT broadcast the raw text to clients here. The server's sequencer
+    // distributes each message as a timed /play command (broadcastPlay) so all devices
+    // start the same message at the same instant.
+    handleSwitch(1);
 }
 
 
+// Reference clock for clients: just our current millis().
+void handleTime() {
+    server.send(200, "text/plain", String((unsigned long)millis()));
+}
+
+// Client-side: receive a timed display command and (re)schedule it. Idempotent on seq.
+void handlePlay() {
+    if (!server.hasArg("seq") || !server.hasArg("data") || !server.hasArg("at")) {
+        server.send(400, "text/plain", "Missing play parameters.");
+        return;
+    }
+    uint32_t seq = (uint32_t)strtoul(server.arg("seq").c_str(), nullptr, 10);
+    uint32_t at  = (uint32_t)strtoul(server.arg("at").c_str(), nullptr, 10);
+
+    if (!currentSchedule.active || seq != currentSchedule.seq) {
+        setSchedule(seq, server.arg("data").c_str(), at);
+        printf("Scheduled seq=%lu at=%lu now=%lu\n",
+               (unsigned long)seq, (unsigned long)at, (unsigned long)serverNow());
+    }
+    server.send(200, "text/plain", "OK");
+}
+
 void handleGetData() {
+  // Entries are stored compactly at [0, sentCount); this is also the display order.
   String json = "[";
   for (int i = 0; i < sentCount; i++) {
-    int index = (sentIndex - sentCount + i + MAX_SENT_STRINGS) % MAX_SENT_STRINGS;
-    json += "\"" + sentStrings[index] + "\"";
+    json += "\"" + sentStrings[i] + "\"";
     if (i < sentCount - 1) {
       json += ",";
     }
@@ -410,13 +529,7 @@ void handleSwitch(uint8_t ledNumber) {
       if (server.hasArg("data")) {
         String newData = server.arg("data");
         newData.toCharArray(Text, sizeof(Text));
-
-        // Store the newData in the sentStrings buffer
-        sentStrings[sentIndex] = newData;
-        sentIndex = (sentIndex + 1) % MAX_SENT_STRINGS;
-        if (sentCount < MAX_SENT_STRINGS) {
-          sentCount++;
-        }
+        addSentString(newData); // Appends and resets that slot's play count
       }
       Flow_Flag = true;
       isDisplaying = false;
@@ -459,8 +572,9 @@ bool connectToServer() {
         retryDelay = 1000; // Reset delay after successful connection
         isConnected = true;
 
-        // Register with the server
+        // Register with the server and sync the shared clock
         registerWithServer();
+        syncClock();
         return true;
     } else {
         retryDelay = min(retryDelay * 2, maxRetryDelay); // Exponential backoff
@@ -483,6 +597,7 @@ void WiFiEvent(WiFiEvent_t event) {
             isConnected = true;
             retryDelay = 1000; // Reset retry delay
             registerWithServer();
+            syncClock();
             break;
         default:
             break;
@@ -541,6 +656,8 @@ void WIFI_Init()
   server.on("/clear", handleClearStrings);
   server.on("/deleteSelected", handleDeleteSelected);
   server.on("/resetPlayCount", handleResetPlayCount);
+  server.on("/time", handleTime);   // shared-clock reference (server) / sync source (client)
+  server.on("/play", handlePlay);   // timed display command received by clients
 
 
   // Endpoint to retrieve pre-made strings
@@ -583,10 +700,13 @@ void WIFI_Loop() {
                 }
             }
       
-        // Client Mode: Send heartbeat at intervals
+        // Client Mode: Send heartbeat at intervals and refresh the clock offset
         if (currentMillis - lastHeartbeat >= heartbeatInterval) {
             lastHeartbeat = currentMillis;
             sendHeartbeat();
+            if (isConnected) {
+                syncClock(); // keep the shared clock from drifting between reconnects
+            }
         }
     } else {
         // AP Mode: Cleanup stale clients at intervals

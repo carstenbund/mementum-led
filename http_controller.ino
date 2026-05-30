@@ -20,9 +20,8 @@ bool isDisplaying = false;
 volatile bool Flow_Flag = false; // Flow flag for display logic
 
 
-// Define sentStrings, sentIndex, sentCount
+// Compact FIFO message queue: valid entries live at [0, sentCount)
 String sentStrings[MAX_SENT_STRINGS];
-int sentIndex = 0;
 int sentCount = 0;
 
 int max_plays = 3;
@@ -35,7 +34,7 @@ char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Action: Start"
 };
 
-// Define sentStrings, sentIndex, sentCount, and playCount
+// Per-entry play counts, parallel to the compact sentStrings queue
 int playCount[MAX_SENT_STRINGS] = {0}; // Tracks how many times each string has been displayed
 
 // Function to load configuration from SPIFFS (config.csv)
@@ -170,54 +169,80 @@ void loop() {
 unsigned long lastExpiredMessageTime = 0; // Tracks the last time the expired message was shown
 const unsigned long expiredMessageInterval = 5000; // Minimum interval for showing the expired message (5 seconds)
 
-void Display_Loop() {
-    if (sentCount == 0){
+// Server (AP) is the master sequencer: it owns the queue, picks the next valid message,
+// schedules a start time, broadcasts a timed /play to all clients, and renders the very
+// same schedule locally so it stays in lockstep with them.
+void serverSequencerLoop() {
+    // A message is currently scheduled/playing: render it until it finishes.
+    if (currentSchedule.active) {
+        renderScheduled(); // sets active=false when the scroll completes
         yield();
-        delay(100);
+        delay(5);
         return;
     }
 
-    if (!isDisplaying) {
-        // Find the next valid string to display
-        int startIndex = currentStringIndex;
-        bool foundValidString = false;
-
-        do {
-             if (playCount[currentStringIndex] < max_plays) {
-                // Start displaying the current string
-                String str = sentStrings[currentStringIndex];
-                str.toCharArray(currentStringBuffer, sizeof(currentStringBuffer));
-                isDisplaying = true;
-                Flow_Flag = false;
-                foundValidString = true;
-                break;
-            } else {
-                // Skip expired strings
-                currentStringIndex = (currentStringIndex + 1) % sentCount;
-            }
-        } while (currentStringIndex != startIndex);
-
-        if (!foundValidString) {
-          // Yield and delay at the end to allow other tasks to run
-            yield();
-            delay(10);
-            return; // All strings are expired
-        }
+    if (sentCount == 0) {
+        yield();
+        delay(50);
+        return;
     }
 
-    if (isDisplaying) {
+    if (currentStringIndex >= sentCount) {
+        currentStringIndex = 0;
+    }
 
-        
-    if (Text_Flow(currentStringBuffer) == 0) {
-        // Increment the play count and move to the next string
-        playCount[currentStringIndex]++;
+    // Find the next message that still has plays left.
+    int startIndex = currentStringIndex;
+    bool found = false;
+    do {
+        if (playCount[currentStringIndex] < max_plays) {
+            found = true;
+            break;
+        }
         currentStringIndex = (currentStringIndex + 1) % sentCount;
-        isDisplaying = false;
-        Flow_Flag = false;
-     }
+    } while (currentStringIndex != startIndex);
 
-   }
-    // Yield and delay at the end to allow other tasks to run
+    if (!found) {
+        // All messages exhausted their plays; wait for new text or a play-count reset.
+        yield();
+        delay(20);
+        return;
+    }
+
+    // Schedule this message to start a fixed lead-time in the future so every client has
+    // time to receive the /play before the shared start instant.
+    uint32_t seq = ++globalSeq;
+    uint32_t displayAt = millis() + DISPLAY_LEAD_MS; // server clock domain
+    String text = sentStrings[currentStringIndex];
+
+    broadcastPlay(seq, text, displayAt);             // tell the clients
+    setSchedule(seq, text.c_str(), displayAt);       // and schedule it locally
+
+    playCount[currentStringIndex]++;
+    currentStringIndex = (currentStringIndex + 1) % sentCount;
+
     yield();
-    delay(10);
+    delay(5);
+}
+
+// Client (STA) is a stateless player: it just renders whatever /play scheduled, keyed off
+// the shared clock. No queue logic, so it can never drift out of step with its peers.
+void clientPlayerLoop() {
+    if (!clockSynced) {
+        // Without the shared clock we cannot place the scroll in time; idle until synced.
+        yield();
+        delay(20);
+        return;
+    }
+    renderScheduled();
+    yield();
+    delay(5);
+}
+
+void Display_Loop() {
+    if (isAPMode) {
+        serverSequencerLoop();
+    } else {
+        clientPlayerLoop();
+    }
 }

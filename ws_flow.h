@@ -49,5 +49,31 @@ int getCharWidth(char c);
 int getStringWidth(const char* str);
 //void Text_Flow(char* Text);
 int Text_Flow(char* Text);
-void Matrix_Init();       
+void Matrix_Init();
+
+// ---- Time-synchronized display (Model A: master sequencer) ----
+#define SCROLL_INTERVAL_MS 120   // ms per 1-pixel scroll step (same on every device)
+#define DISPLAY_LEAD_MS    2000  // how far ahead the server schedules a message start
+
+// A single scheduled message. Every device (server + clients) renders the scroll
+// position as a pure function of the shared clock, so they stay phase-locked and a
+// dropped frame self-corrects on the next one.
+struct DisplaySchedule {
+    uint32_t seq;        // monotonic id; supersedes older items, dedups duplicates
+    uint32_t displayAt;  // server-clock timecode at which scrolling begins
+    char text[100];      // color-stripped text to render
+    int textWidth;       // precomputed pixel width
+    uint16_t color;      // resolved text color
+    int lastStep;        // last scroll step drawn (redraw only on change)
+    bool active;         // false = nothing scheduled / finished
+};
+extern DisplaySchedule currentSchedule;
+
+// serverNow() lives in ws_wifi.cpp (it owns the clock offset); declared here so the
+// renderer can read the shared clock without pulling in the WiFi header.
+uint32_t serverNow();
+
+void applyColorAndStrip(const char* raw, char* out, size_t outSize, uint16_t* colorOut);
+void setSchedule(uint32_t seq, const char* raw, uint32_t displayAt);
+bool renderScheduled();  // returns true while showing/pending, false when idle/finished
 #endif
