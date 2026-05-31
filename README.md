@@ -7,6 +7,12 @@ Implemented with Arduino IDE, for ESP32-S3 with integrated display
 
 This codebase includes both client and server, defined by config choice at runtime.
 
+A Raspberry Pi can also act as a dedicated server that fully replicates the ESP32
+AP-mode server (same SSID/PSK, IP, and protocol) to grow the swarm past the ~20
+client soft-AP limit. See `raspberry/` for a one-shot installer and boot-into-server
+services. Note: the legacy top-level `setup.sh` advertises a different SSID/password
+than the firmware clients expect — use `raspberry/install.sh` instead.
+
 Maximum devices are about 20 in this configuration.
 
 The system boots, evaluated configuration to set mode and network specifics.

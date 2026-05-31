@@ -1,0 +1,18 @@
+[Unit]
+Description=Mementum LED control server (master sequencer)
+# The server binds 10.10.10.1:80, which only exists once the AP is up.
+After=network-online.target hostapd.service dnsmasq.service
+Wants=network-online.target hostapd.service dnsmasq.service
+
+[Service]
+Type=simple
+# Paths below are filled in by install.sh (repo dir and venv python).
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__PYTHON__ __INSTALL_DIR__/server.py
+Restart=on-failure
+RestartSec=3
+# server.py binds port 80, which needs privilege.
+User=root
+
+[Install]
+WantedBy=multi-user.target
