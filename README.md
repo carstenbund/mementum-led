@@ -13,7 +13,9 @@ client soft-AP limit. See `raspberry/` for a one-shot installer and boot-into-se
 services. Note: the legacy top-level `setup.sh` advertises a different SSID/password
 than the firmware clients expect — use `raspberry/install.sh` instead.
 
-Maximum devices are about 20 in this configuration.
+An ESP32-hosted server handles about 20 devices. The Raspberry Pi server scales
+further (concurrent broadcast; ~50+ with suitable access-point hardware) — see
+`raspberry/README.md`.
 
 The system boots, evaluated configuration to set mode and network specifics.
 When configures as server the system will create a softAP to allow clients to connct and register.

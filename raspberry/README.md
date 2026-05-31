@@ -8,6 +8,22 @@ ESP32 clients connect and stay in sync.
 The Pi runs `server.py` (the master sequencer: shared `/time` clock + timed `/play`
 push), and hosts the Wi-Fi network the clients already look for.
 
+## Scaling past 20 clients
+
+The ESP32's ~20-client ceiling came from three stacked limits: the soft-AP radio cap
+(`max_connection=16`), sequential per-client broadcast whose fan-out time grew with the
+client count, and a small queue. On the Pi:
+
+- **Broadcast is concurrent** — `server.py` pushes `/play` to all clients in parallel
+  (`BROADCAST_WORKERS`), so total fan-out stays ~flat (≈ slowest single client, well
+  under the 2 s display lead) instead of `N × timeout`. Measured: 50 clients in ~0.5 s.
+- **Caps raised** — `max_num_sta=64` and a near-full /24 DHCP pool (`.2–.250`).
+
+The remaining real limit is the **access point hardware**: the built-in Raspberry Pi
+radio reliably serves only **~8–16 AP clients** no matter the config. For ~50 real
+clients use an external USB Wi-Fi adapter in AP mode or a dedicated AP/router; for 250+
+also widen the subnet to /23 (`dnsmasq.conf` + `dhcpcd.append.conf`).
+
 ## Parity with the ESP32 server
 
 These values are fixed to match the firmware so existing clients just work:
