@@ -121,6 +121,15 @@ The stored-strings list also has a **"Nochmal abspielen"** (Play again) button t
 resets the play count for the checkmarked strings (`/resetPlayCount`) so the sequencer
 schedules them again; with nothing checked it replays all.
 
+### Editable text fragments (SQLite)
+
+The **Textbausteine** mask on the admin page edits the preset library ("Vorgaben"):
+add, rename, and delete fragments. They are persisted in a SQLite file
+(`fragments.db`, next to `server.py`; override with the `MEMENTUM_DB` env var) so they
+survive restarts, and the preset buttons are fed from the same store. On first run the
+table is seeded from the built-in defaults. Endpoints: `GET /fragments`, `/addFragment`,
+`/updateFragment?id=`, `/deleteFragment?id=`.
+
 ## Files
 
 | Path                              | Purpose                                          |

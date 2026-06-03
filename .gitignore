@@ -54,3 +54,7 @@ dkms.conf
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Server fragment store (runtime data)
+fragments.db
+*.db
