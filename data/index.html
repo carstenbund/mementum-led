@@ -67,7 +67,7 @@
         .radio-buttons button:hover, .pre-made-buttons button:hover {
             background-color: #555;
         }
-        .input-container button, .button-container button {
+        .input-container button, .button-container button, .sent-strings-container button {
             padding: 5px 10px;
             background-color: #333;
             color: #fff;
@@ -324,6 +324,9 @@
             // onerror: EventSource auto-reconnects; nothing to do.
         }
 
+        function toggleDebugLog(cb) {
+            document.getElementById('debugSection').style.display = cb.checked ? 'block' : 'none';
+        }
         function toggleDebug(cb) { showDebug = cb.checked; }
         function togglePause(cb) { logPaused = cb.checked; }
         function clearLog() { document.getElementById('logWindow').innerHTML = ''; }
@@ -387,13 +390,20 @@
             <tbody id="clientsBody"></tbody>
         </table>
 
-        <h3>Debug Log</h3>
         <div class="controls">
-            <label><input type="checkbox" onchange="toggleDebug(this)"> Show debug (heartbeats &amp; acks)</label>
-            <label><input type="checkbox" onchange="togglePause(this)"> Pause</label>
-            <button onclick="clearLog()">Clear</button>
+            <label><input type="checkbox" id="debugToggle" onchange="toggleDebugLog(this)"> Debug-Log anzeigen</label>
         </div>
-        <div id="logWindow"></div>
+
+        <!-- Debug log: hidden by default, only for error checking (toggle above). -->
+        <div id="debugSection" style="display: none;">
+            <h3>Debug Log</h3>
+            <div class="controls">
+                <label><input type="checkbox" onchange="toggleDebug(this)"> Heartbeats &amp; Acks anzeigen</label>
+                <label><input type="checkbox" onchange="togglePause(this)"> Pause</label>
+                <button onclick="clearLog()">Clear</button>
+            </div>
+            <div id="logWindow"></div>
+        </div>
     </div>
 </body>
 </html>

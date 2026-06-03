@@ -112,8 +112,10 @@ The admin page at `http://10.10.10.1` also has a built-in **Status** panel and a
 - **Status** — a table of every client (connection dot, ID, IP, version, first seen,
   last seen). Disappeared clients stay listed as "gone Ns ago" until they time out.
   Backed by `GET /clients` (JSON), polled every 2 s.
-- **Debug Log** — a live stream of server events via `GET /logstream` (Server-Sent
-  Events). Tick **"Show debug"** to include per-client heartbeats and clock syncs.
+- **Debug Log** — hidden by default (it's only for error checking); tick
+  **"Debug-Log anzeigen"** to reveal it. It streams server events via
+  `GET /logstream` (Server-Sent Events); a second checkbox adds per-client
+  heartbeats and clock syncs.
 
 The stored-strings list also has a **"Nochmal abspielen"** (Play again) button that
 resets the play count for the checkmarked strings (`/resetPlayCount`) so the sequencer
