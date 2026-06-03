@@ -84,6 +84,26 @@ sudo reboot                   # or just reboot: it comes up as the AP server
 After boot, ESP32 clients associate to `mementumLED` and reach the server at
 `http://10.10.10.1`. The admin UI is the same `data/index.html` served at `/`.
 
+## Live logs / "clients connect but show no text"
+
+```bash
+sudo ./raspberry/logs.sh          # follow server + hostapd + dnsmasq live
+sudo ./raspberry/logs.sh server   # just the control server
+```
+
+What to look for in the server log:
+
+- `REGISTER new ID=.. IP=.. version=1.3` — a client checked in. `version=?` with a
+  **WARNING** means that client runs **old firmware** that predates the timed `/play`
+  protocol: it will heartbeat fine but **never display text**. Reflash it to **≥1.3**.
+- `PLAY seq=.. at=.. now=.. targets=N text=..` — the sequencer scheduled a message.
+  `targets=0` means no clients are registered. Then `Broadcast /play -> N/N OK`
+  confirms each client accepted it.
+
+This is the usual cause of "heartbeats acknowledged but no text": the server now
+distributes messages only via timed `/play` (with shared-clock sync), which old 1.2
+firmware doesn't implement. The fix is to reflash the clients, not to change the server.
+
 ## Files
 
 | Path                              | Purpose                                          |
@@ -91,6 +111,7 @@ After boot, ESP32 clients associate to `mementumLED` and reach the server at
 | `install.sh`                      | One-shot installer (idempotent)                  |
 | `start.sh` / `stop.sh`            | Bring the AP + server up / down now              |
 | `status.sh`                       | Service + network + queue status                 |
+| `logs.sh`                         | Follow live server / hostapd / dnsmasq logs      |
 | `ap-prepare.sh`                   | Release `wlan0` from NM/wpa_supplicant + set IP  |
 | `requirements.txt`                | Python deps for `server.py`                      |
 | `config/hostapd.conf`             | Access point (SSID/PSK/channel)                  |
