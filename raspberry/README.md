@@ -112,12 +112,23 @@ The admin page at `http://10.10.10.1` also has a built-in **Status** panel and a
 - **Status** — a table of every client (connection dot, ID, IP, version, first seen,
   last seen). Disappeared clients stay listed as "gone Ns ago" until they time out.
   Backed by `GET /clients` (JSON), polled every 2 s.
-- **Debug Log** — a live stream of server events via `GET /logstream` (Server-Sent
-  Events). Tick **"Show debug"** to include per-client heartbeats and clock syncs.
+- **Debug Log** — hidden by default (it's only for error checking); tick
+  **"Debug-Log anzeigen"** to reveal it. It streams server events via
+  `GET /logstream` (Server-Sent Events); a second checkbox adds per-client
+  heartbeats and clock syncs.
 
 The stored-strings list also has a **"Nochmal abspielen"** (Play again) button that
 resets the play count for the checkmarked strings (`/resetPlayCount`) so the sequencer
 schedules them again; with nothing checked it replays all.
+
+### Editable text fragments (SQLite)
+
+The **Textbausteine** mask on the admin page edits the preset library ("Vorgaben"):
+add, rename, and delete fragments. They are persisted in a SQLite file
+(`fragments.db`, next to `server.py`; override with the `MEMENTUM_DB` env var) so they
+survive restarts, and the preset buttons are fed from the same store. On first run the
+table is seeded from the built-in defaults. Endpoints: `GET /fragments`, `/addFragment`,
+`/updateFragment?id=`, `/deleteFragment?id=`.
 
 ## Files
 

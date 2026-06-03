@@ -22,7 +22,9 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 from concurrent.futures import ThreadPoolExecutor
 import collections
 import json
+import os
 import queue
+import sqlite3
 import sys
 import time
 import threading
@@ -56,11 +58,48 @@ BROADCAST_TIMEOUT = 2.0       # seconds per /play request (firmware uses 2000 ms
 # for many clients. Raise this with the client count; it bounds peak concurrent sockets.
 BROADCAST_WORKERS = 64
 
+# Seed list for the fragment store on first run (table created empty otherwise).
 PREMADE_STRINGS = ["Hello World", "Temperature: 25C", "Status: OK",
                    "Error: None", "Action: Start"]
 
+MAX_TEXT_LENGTH = 100         # matches firmware MAX_TEXT_LENGTH (ws_wifi.h)
+
 # @color prefixes recognized by the firmware (ws_flow.h colorMap)
 COLOR_PREFIXES = ["@red", "@green", "@blue", "@pink", "@yellow", "@cyan"]
+
+# ---- Persistent text-fragment store (SQLite) ----
+# Editable library of reusable text fragments ("Vorgaben"), persisted so they survive
+# restarts. Path is overridable for tests; defaults next to this file.
+DB_PATH = os.environ.get(
+    "MEMENTUM_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fragments.db"))
+db_lock = threading.Lock()    # serialize writes to avoid "database is locked"
+
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def db_init():
+    with db_lock, db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS fragments (
+                            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                            text     TEXT NOT NULL,
+                            position INTEGER NOT NULL DEFAULT 0)""")
+        if conn.execute("SELECT COUNT(*) FROM fragments").fetchone()[0] == 0:
+            conn.executemany("INSERT INTO fragments (text, position) VALUES (?, ?)",
+                             [(t, i) for i, t in enumerate(PREMADE_STRINGS)])
+
+
+def db_fragments():
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT id, text FROM fragments ORDER BY position, id").fetchall()
+    return [{"id": r["id"], "text": r["text"]} for r in rows]
+
+
+db_init()
 
 # ---- Shared state (guarded by state_lock) ----
 state_lock = threading.Lock()
@@ -232,7 +271,60 @@ def get_data():
 
 @app.route("/getPreMade")
 def get_pre_made():
-    return jsonify(PREMADE_STRINGS)
+    # Preset buttons are fed from the editable fragment store.
+    return jsonify([f["text"] for f in db_fragments()])
+
+
+# ---- Text-fragment store (editable "Vorgaben" library) ----
+def _clean_fragment_text():
+    text = (request.args.get('text') or '').strip()
+    return text[:MAX_TEXT_LENGTH]
+
+
+@app.route("/fragments")
+def list_fragments():
+    return jsonify(db_fragments())
+
+
+@app.route("/addFragment")
+def add_fragment():
+    text = _clean_fragment_text()
+    if not text:
+        return jsonify({"status": "error", "message": "Empty fragment."}), 400
+    with db_lock, db_connect() as conn:
+        nextpos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM fragments").fetchone()[0]
+        conn.execute("INSERT INTO fragments (text, position) VALUES (?, ?)", (text, nextpos))
+    log.emit("FRAGMENT  add %r" % text)
+    return jsonify(db_fragments())
+
+
+@app.route("/updateFragment")
+def update_fragment():
+    text = _clean_fragment_text()
+    if not request.args.get('id', '').isdigit():
+        return jsonify({"status": "error", "message": "Missing/invalid id."}), 400
+    if not text:
+        return jsonify({"status": "error", "message": "Empty fragment."}), 400
+    fid = int(request.args['id'])
+    with db_lock, db_connect() as conn:
+        cur = conn.execute("UPDATE fragments SET text = ? WHERE id = ?", (text, fid))
+        changed = cur.rowcount
+    if not changed:
+        return jsonify({"status": "error", "message": "No such fragment."}), 404
+    log.emit("FRAGMENT  update id=%d %r" % (fid, text))
+    return jsonify(db_fragments())
+
+
+@app.route("/deleteFragment")
+def delete_fragment():
+    if not request.args.get('id', '').isdigit():
+        return jsonify({"status": "error", "message": "Missing/invalid id."}), 400
+    fid = int(request.args['id'])
+    with db_lock, db_connect() as conn:
+        conn.execute("DELETE FROM fragments WHERE id = ?", (fid,))
+    log.emit("FRAGMENT  delete id=%d" % fid)
+    return jsonify(db_fragments())
 
 
 @app.route("/SendData")

@@ -67,7 +67,8 @@
         .radio-buttons button:hover, .pre-made-buttons button:hover {
             background-color: #555;
         }
-        .input-container button, .button-container button {
+        .input-container button, .button-container button, .sent-strings-container button,
+        #fragmentSection button {
             padding: 5px 10px;
             background-color: #333;
             color: #fff;
@@ -104,6 +105,13 @@
         #logWindow .log-info  { color: #7CFC00; }
         #logWindow .log-debug { color: #6cb6ff; }
         .muted { font-size: 13px; color: #777; font-weight: normal; }
+        /* Fragment edit mask */
+        .fragment-list, .frag-add { width: 80%; margin: 0 auto; }
+        .frag-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+        .frag-row input[type="text"] {
+            flex: 1; padding: 5px; border: 1px solid #ccc; border-radius: 3px;
+        }
+        .frag-add { margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -225,6 +233,63 @@
             xhr.send();
         }
 
+        // ---- Fragment edit mask (SQLite-backed "Vorgaben"; Pi server only) ----
+        function fetchFragments() {
+            fetch('/fragments').then(function(r) {
+                if (!r.ok) throw new Error('no /fragments');
+                return r.json();
+            }).then(renderFragments).catch(function() {
+                var s = document.getElementById('fragmentSection');
+                if (s) s.style.display = 'none';   // endpoint absent (e.g. ESP32 server)
+            });
+        }
+
+        function renderFragments(list) {
+            var box = document.getElementById('fragmentList');
+            box.innerHTML = '';
+            list.forEach(function(f) {
+                var row = document.createElement('div');
+                row.className = 'frag-row';
+                row.innerHTML =
+                    '<input type="text" maxlength="100" id="frag' + f.id + '">' +
+                    '<button onclick="updateFragment(' + f.id + ')">Speichern</button>' +
+                    '<button onclick="deleteFragment(' + f.id + ')">Löschen</button>';
+                box.appendChild(row);
+                // Assign value as a property so quotes/special chars can't break markup.
+                document.getElementById('frag' + f.id).value = f.text;
+            });
+        }
+
+        function applyFragmentResult(r) {
+            if (!r.ok) return null;
+            return r.json();
+        }
+        function afterFragmentChange(list) {
+            if (list) { renderFragments(list); fetchPreMadeStrings(); }
+        }
+
+        function addFragment() {
+            var inp = document.getElementById('newFragment');
+            var t = inp.value.trim();
+            if (!t) return;
+            fetch('/addFragment?text=' + encodeURIComponent(t))
+                .then(applyFragmentResult)
+                .then(function(list) { if (list) { inp.value = ''; afterFragmentChange(list); } });
+        }
+
+        function updateFragment(id) {
+            var t = document.getElementById('frag' + id).value.trim();
+            if (!t) return;
+            fetch('/updateFragment?id=' + id + '&text=' + encodeURIComponent(t))
+                .then(applyFragmentResult).then(afterFragmentChange);
+        }
+
+        function deleteFragment(id) {
+            if (!confirm('Textbaustein löschen?')) return;
+            fetch('/deleteFragment?id=' + id)
+                .then(applyFragmentResult).then(afterFragmentChange);
+        }
+
         function displaySentStrings() {
             var list = document.getElementById('sentStringsList');
             list.innerHTML = '';
@@ -324,6 +389,9 @@
             // onerror: EventSource auto-reconnects; nothing to do.
         }
 
+        function toggleDebugLog(cb) {
+            document.getElementById('debugSection').style.display = cb.checked ? 'block' : 'none';
+        }
         function toggleDebug(cb) { showDebug = cb.checked; }
         function togglePause(cb) { logPaused = cb.checked; }
         function clearLog() { document.getElementById('logWindow').innerHTML = ''; }
@@ -331,6 +399,7 @@
         window.onload = function() {
             fetchSentStrings();
             fetchPreMadeStrings();
+            fetchFragments();
             fetchClients();
             statusTimer = setInterval(fetchClients, 2000);
             connectLog();
@@ -375,6 +444,19 @@
         </div>
     </div>
 
+    <div class="container" id="fragmentSection">
+        <h3>Textbausteine <span class="muted">(Vorgaben bearbeiten)</span></h3>
+        <div id="fragmentList" class="fragment-list">
+            <!-- Editable fragments populated here -->
+        </div>
+        <div class="frag-add">
+            <div class="frag-row">
+                <input type="text" id="newFragment" maxlength="100" placeholder="Neuer Textbaustein…">
+                <button onclick="addFragment()">Hinzufügen</button>
+            </div>
+        </div>
+    </div>
+
     <div class="container" id="statusSection">
         <h3>Status <span id="clientsSummary" class="muted"></span></h3>
         <table class="clients">
@@ -387,13 +469,20 @@
             <tbody id="clientsBody"></tbody>
         </table>
 
-        <h3>Debug Log</h3>
         <div class="controls">
-            <label><input type="checkbox" onchange="toggleDebug(this)"> Show debug (heartbeats &amp; acks)</label>
-            <label><input type="checkbox" onchange="togglePause(this)"> Pause</label>
-            <button onclick="clearLog()">Clear</button>
+            <label><input type="checkbox" id="debugToggle" onchange="toggleDebugLog(this)"> Debug-Log anzeigen</label>
         </div>
-        <div id="logWindow"></div>
+
+        <!-- Debug log: hidden by default, only for error checking (toggle above). -->
+        <div id="debugSection" style="display: none;">
+            <h3>Debug Log</h3>
+            <div class="controls">
+                <label><input type="checkbox" onchange="toggleDebug(this)"> Heartbeats &amp; Acks anzeigen</label>
+                <label><input type="checkbox" onchange="togglePause(this)"> Pause</label>
+                <button onclick="clearLog()">Clear</button>
+            </div>
+            <div id="logWindow"></div>
+        </div>
     </div>
 </body>
 </html>
