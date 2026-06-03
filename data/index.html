@@ -234,6 +234,13 @@
         }
 
         // ---- Fragment edit mask (SQLite-backed "Vorgaben"; Pi server only) ----
+        function toggleFragments() {
+            var body = document.getElementById('fragmentBody');
+            var open = body.style.display === 'none';
+            body.style.display = open ? 'block' : 'none';
+            document.getElementById('fragmentCaret').innerHTML = open ? '&#9662;' : '&#9656;';
+        }
+
         function fetchFragments() {
             fetch('/fragments').then(function(r) {
                 if (!r.ok) throw new Error('no /fragments');
@@ -445,14 +452,19 @@
     </div>
 
     <div class="container" id="fragmentSection">
-        <h3>Textbausteine <span class="muted">(Vorgaben bearbeiten)</span></h3>
-        <div id="fragmentList" class="fragment-list">
-            <!-- Editable fragments populated here -->
-        </div>
-        <div class="frag-add">
-            <div class="frag-row">
-                <input type="text" id="newFragment" maxlength="100" placeholder="Neuer Textbaustein…">
-                <button onclick="addFragment()">Hinzufügen</button>
+        <h3 id="fragmentHeader" style="cursor: pointer; user-select: none;" onclick="toggleFragments()">
+            <span id="fragmentCaret">&#9656;</span> Textbausteine
+            <span class="muted">(Vorgaben bearbeiten)</span>
+        </h3>
+        <div id="fragmentBody" style="display: none;">
+            <div id="fragmentList" class="fragment-list">
+                <!-- Editable fragments populated here -->
+            </div>
+            <div class="frag-add">
+                <div class="frag-row">
+                    <input type="text" id="newFragment" maxlength="100" placeholder="Neuer Textbaustein…">
+                    <button onclick="addFragment()">Hinzufügen</button>
+                </div>
             </div>
         </div>
     </div>
