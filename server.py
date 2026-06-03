@@ -18,8 +18,11 @@ server is a drop-in replacement that lets the swarm grow past the ~20
 client limit of the ESP32 soft-AP.
 """
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from concurrent.futures import ThreadPoolExecutor
+import collections
+import json
+import queue
 import sys
 import time
 import threading
@@ -66,11 +69,59 @@ sent_strings = []             # compact FIFO of raw texts (may include @color pr
 play_counts = []              # parallel to sent_strings
 cur_index = 0                 # sequencer cursor
 
-registered_clients = {}       # ip -> {'id': int, 'last_seen': float}
+# ip -> {'id', 'version', 'first_seen', 'last_seen', 'active'}. Clients are kept
+# after they go stale (active=False) so the status window can still show them with
+# the time they were last seen; PURGE_INACTIVE bounds how long they linger.
+registered_clients = {}
 next_client_id = 0
 global_seq = 0                # monotonic schedule sequence number
+PURGE_INACTIVE = 3600         # seconds: drop a disappeared client from the table after this
 
 _clock_start = time.monotonic()
+
+
+# ---- Live event log (status window / debug stream) ----
+class LogHub:
+    """Fan server events out to any number of SSE subscribers and keep a short history.
+
+    'info' events (register, play, broadcast, disappear) also go to journald via print();
+    'debug' events (heartbeats, clock syncs) are streamed to the web debug view only, so
+    journald is not flooded by per-client chatter.
+    """
+    def __init__(self, history=300):
+        self._history = collections.deque(maxlen=history)
+        self._subscribers = set()
+        self._lock = threading.Lock()
+
+    def emit(self, msg, level="info", journal=True):
+        event = {"t": time.strftime("%H:%M:%S"), "level": level, "msg": msg}
+        if journal:
+            print(msg)
+        with self._lock:
+            self._history.append(event)
+            for q in list(self._subscribers):
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass
+
+    def subscribe(self):
+        q = queue.Queue(maxsize=1000)
+        with self._lock:
+            for event in self._history:   # seed the new viewer with recent history
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    break
+            self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self._lock:
+            self._subscribers.discard(q)
+
+
+log = LogHub()
 
 
 def server_now():
@@ -146,9 +197,9 @@ def _broadcast(route, params, targets):
         if success:
             ok += 1
         else:
-            print("Broadcast %s FAILED to client ID=%s, IP=%s: %s"
-                  % (route, by_ip.get(ip), ip, info))
-    print("Broadcast %s -> %d/%d clients OK" % (route, ok, len(targets)))
+            log.emit("BROADCAST %s FAILED ID=%s IP=%s: %s"
+                     % (route, by_ip.get(ip), ip, info))
+    log.emit("BROADCAST %s -> %d/%d clients OK" % (route, ok, len(targets)))
 
 
 def broadcast_play(seq, text, display_at, targets):
@@ -162,7 +213,9 @@ def broadcast_simple(route, targets):
 
 
 def snapshot_targets():
-    return [(ip, c['id']) for ip, c in registered_clients.items()]
+    # Only push to clients we still believe are present; disappeared ones are kept
+    # in the table for display but must not be broadcast to.
+    return [(ip, c['id']) for ip, c in registered_clients.items() if c.get('active', True)]
 
 
 # ---- HTTP routes (mirror the firmware route table) ----
@@ -216,19 +269,25 @@ def register():
         if ip not in registered_clients:
             # Monotonic IDs, never reused after cleanup (mirrors firmware fix).
             cid = next_client_id
-            registered_clients[ip] = {'id': cid, 'last_seen': now, 'version': version}
+            registered_clients[ip] = {'id': cid, 'version': version,
+                                      'first_seen': now, 'last_seen': now, 'active': True}
             next_client_id += 1
             response = "Registered successfully. Your ID: %d" % cid
-            print("REGISTER  new   ID=%d IP=%s version=%s" % (cid, ip, version))
+            event = "REGISTER  new   ID=%d IP=%s version=%s" % (cid, ip, version)
         else:
             client = registered_clients[ip]
+            reappeared = not client.get('active', True)
             client['last_seen'] = now
             client['version'] = version
-            response = "Already registered. Your ID: %d" % client['id']
-            print("REGISTER  again ID=%d IP=%s version=%s" % (client['id'], ip, version))
+            client['active'] = True
+            cid = client['id']
+            response = "Already registered. Your ID: %d" % cid
+            event = "REGISTER  %s ID=%d IP=%s version=%s" % (
+                "back " if reappeared else "again", cid, ip, version)
+    log.emit(event)
     if version == '?':
-        print("  WARNING: client IP=%s reports no version -> likely OLD firmware that "
-              "does not support timed /play; reflash to >=1.3 or it will show no text." % ip)
+        log.emit("  WARNING: client IP=%s reports no version -> likely OLD firmware that "
+                 "does not support timed /play; reflash to >=1.3 or it will show no text." % ip)
     return response
 
 
@@ -239,15 +298,67 @@ def heartbeat():
     with state_lock:
         client = registered_clients.get(ip)
         if client is None:
+            log.emit("HEARTBEAT unknown IP=%s -> asked to re-register" % ip,
+                     level="debug", journal=False)
             return "Unknown client. Please re-register.", 400
         client['last_seen'] = time.time()
+        reappeared = not client.get('active', True)
+        client['active'] = True
+        cid = client['id']
+    if reappeared:
+        log.emit("RECONNECT ID=%d IP=%s (heartbeat after going stale)" % (cid, ip))
+    log.emit("HEARTBEAT ack    ID=%d IP=%s" % (cid, ip), level="debug", journal=False)
     return "Heartbeat acknowledged.", 200
 
 
 @app.route("/time")
 def get_time():
     # Reference clock for clients (Cristian's algorithm source).
-    return str(server_now())
+    now = server_now()
+    log.emit("CLOCK     /time -> %d  (from IP=%s)" % (now, request.remote_addr),
+             level="debug", journal=False)
+    return str(now)
+
+
+@app.route("/clients")
+def clients():
+    """Status snapshot for the admin window: who is/was connected, and since/until when."""
+    now = time.time()
+    with state_lock:
+        rows = []
+        for ip, c in registered_clients.items():
+            rows.append({
+                "id": c['id'],
+                "ip": ip,
+                "version": c.get('version', '?'),
+                "first_seen": c['first_seen'],
+                "last_seen": c['last_seen'],
+                "active": bool(c.get('active', True)),
+                "age": round(now - c['last_seen'], 1),  # seconds since last contact
+            })
+    rows.sort(key=lambda r: r['id'])
+    return jsonify({"now": now, "heartbeat_timeout": HEARTBEAT_TIMEOUT, "clients": rows})
+
+
+@app.route("/logstream")
+def logstream():
+    """Server-Sent Events stream of server log events (status + debug) for the UI window."""
+    def gen():
+        q = log.subscribe()
+        try:
+            # An initial comment makes some proxies start streaming immediately.
+            yield ": connected\n\n"
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                    yield "data: %s\n\n" % json.dumps(event)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"   # hold the connection open through idle gaps
+        finally:
+            log.unsubscribe(q)
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+               "Connection": "keep-alive"}
+    return Response(gen(), mimetype="text/event-stream", headers=headers)
 
 
 @app.route("/play")
@@ -304,13 +415,23 @@ def delete_selected():
 def cleanup_stale_clients():
     while True:
         now = time.time()
+        disappeared, purged = [], []
         with state_lock:
-            stale = [ip for ip, c in registered_clients.items()
-                     if now - c['last_seen'] > HEARTBEAT_TIMEOUT]
-            for ip in stale:
-                print("Removing stale client: ID=%d, IP=%s"
-                      % (registered_clients[ip]['id'], ip))
-                del registered_clients[ip]
+            for ip, c in list(registered_clients.items()):
+                idle = now - c['last_seen']
+                if c.get('active', True) and idle > HEARTBEAT_TIMEOUT:
+                    # Keep the record (so the status window can show "last seen"),
+                    # just mark it gone so we stop broadcasting to it.
+                    c['active'] = False
+                    disappeared.append((c['id'], ip, idle))
+                elif not c.get('active', True) and idle > PURGE_INACTIVE:
+                    purged.append((c['id'], ip))
+                    del registered_clients[ip]
+        for cid, ip, idle in disappeared:
+            log.emit("DISAPPEAR ID=%d IP=%s (no heartbeat for %ds)" % (cid, ip, int(idle)))
+        for cid, ip in purged:
+            log.emit("PURGE     ID=%d IP=%s (gone > %ds, dropped from table)"
+                     % (cid, ip, PURGE_INACTIVE))
         time.sleep(CLEANUP_INTERVAL)
 
 
@@ -350,10 +471,10 @@ def sequencer():
             time.sleep(0.05)  # idle: nothing to play or all plays exhausted
             continue
 
-        print("PLAY      seq=%d at=%d now=%d targets=%d text=%r"
-              % (seq, display_at, server_now(), len(targets), text))
+        log.emit("PLAY      seq=%d at=%d now=%d targets=%d text=%r"
+                 % (seq, display_at, server_now(), len(targets), text))
         if not targets:
-            print("  (no registered clients to receive this /play)")
+            log.emit("  (no active clients to receive this /play)")
         broadcast_play(seq, text, display_at, targets)
         # Wait the lead-in plus the scroll so the next /play arrives after this one ends.
         time.sleep((DISPLAY_LEAD_MS + scroll_duration_ms(text)) / 1000.0)

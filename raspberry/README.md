@@ -104,6 +104,21 @@ This is the usual cause of "heartbeats acknowledged but no text": the server now
 distributes messages only via timed `/play` (with shared-clock sync), which old 1.2
 firmware doesn't implement. The fix is to reflash the clients, not to change the server.
 
+### Status window in the browser
+
+The admin page at `http://10.10.10.1` also has a built-in **Status** panel and a live
+**Debug Log** (no terminal needed — works from a phone on the AP):
+
+- **Status** — a table of every client (connection dot, ID, IP, version, first seen,
+  last seen). Disappeared clients stay listed as "gone Ns ago" until they time out.
+  Backed by `GET /clients` (JSON), polled every 2 s.
+- **Debug Log** — a live stream of server events via `GET /logstream` (Server-Sent
+  Events). Tick **"Show debug"** to include per-client heartbeats and clock syncs.
+
+The stored-strings list also has a **"Nochmal abspielen"** (Play again) button that
+resets the play count for the checkmarked strings (`/resetPlayCount`) so the sequencer
+schedules them again; with nothing checked it replays all.
+
 ## Files
 
 | Path                              | Purpose                                          |
