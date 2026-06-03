@@ -52,6 +52,33 @@ fi
 install -d /etc/dnsmasq.d
 install -m 0644 "$SCRIPT_DIR/config/dnsmasq.conf" /etc/dnsmasq.d/mementum.conf
 
+echo "==> Releasing wlan0 from the existing network configuration..."
+# This is what lets the AP actually come up on a Pi that is already joined to a
+# Wi-Fi network. Both common Raspberry Pi OS stacks are handled:
+#   - NetworkManager (Bookworm): told to leave wlan0 unmanaged, permanently.
+#   - wpa_supplicant client (Bullseye/older): the per-interface unit is disabled.
+# Only wlan0 is affected; eth0 / wired admin stays managed.
+install -m 0755 "$SCRIPT_DIR/ap-prepare.sh" /usr/local/sbin/mementum-ap-prepare
+
+install -d /etc/NetworkManager/conf.d
+install -m 0644 "$SCRIPT_DIR/config/networkmanager-unmanaged.conf" \
+    /etc/NetworkManager/conf.d/99-mementum-unmanaged.conf
+if systemctl is-active --quiet NetworkManager; then
+    systemctl reload NetworkManager || true
+fi
+
+# Stop wlan0 ever being brought up as a Wi-Fi client by wpa_supplicant.
+systemctl disable --now wpa_supplicant@wlan0.service 2>/dev/null || true
+
+# Run the release+static-IP step right before hostapd, and gate dnsmasq on the AP
+# being up, via systemd drop-ins (kept across package upgrades).
+install -d /etc/systemd/system/hostapd.service.d
+install -m 0644 "$SCRIPT_DIR/systemd/hostapd.dropin.conf" \
+    /etc/systemd/system/hostapd.service.d/10-mementum.conf
+install -d /etc/systemd/system/dnsmasq.service.d
+install -m 0644 "$SCRIPT_DIR/systemd/dnsmasq.dropin.conf" \
+    /etc/systemd/system/dnsmasq.service.d/10-mementum.conf
+
 echo "==> Configuring static IP for wlan0..."
 # Append our wlan0 stanza to dhcpcd.conf once (idempotent).
 if ! grep -q "# Mementum LED AP" /etc/dhcpcd.conf 2>/dev/null; then

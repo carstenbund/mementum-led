@@ -38,7 +38,7 @@ These values are fixed to match the firmware so existing clients just work:
 
 ## Install
 
-On a fresh Raspberry Pi OS (Bookworm) with a `wlan0` interface:
+On Raspberry Pi OS (Bookworm or Bullseye) with a `wlan0` interface:
 
 ```bash
 git clone <this-repo>
@@ -49,6 +49,28 @@ sudo ./raspberry/install.sh
 This installs `hostapd` + `dnsmasq`, writes the AP/DHCP config, pins `wlan0` to
 `10.10.10.1`, creates a Python venv with Flask + requests, and installs a
 `mementum-server` systemd service enabled at boot.
+
+### Taking wlan0 over from an existing network
+
+If the Pi is already joined to a Wi-Fi network, that connection must be released
+or hostapd cannot switch the radio into AP mode (the symptom: AP never appears /
+no DHCP offers). The installer handles this automatically for both Raspberry Pi
+OS network stacks, touching **only `wlan0`** (wired `eth0`/admin is left alone):
+
+- **NetworkManager** (Bookworm): `wlan0` is marked permanently *unmanaged* via
+  `/etc/NetworkManager/conf.d/99-mementum-unmanaged.conf`.
+- **wpa_supplicant** (Bullseye/older): `wpa_supplicant@wlan0.service` is disabled.
+- On every AP start, `mementum-ap-prepare` (a hostapd `ExecStartPre`) re-releases
+  `wlan0`, flushes any client-mode address, and re-asserts the static AP IP — so
+  it is self-healing across reboots and `systemctl restart hostapd`.
+
+> ⚠️ **If you administer the Pi over its Wi-Fi (`wlan0`), bringing up the AP will
+> drop your SSH session** — the radio can't be a client and an AP at once. After
+> it comes up, reconnect to SSID `mementumLED` and SSH to `10.10.10.1`. Prefer a
+> wired/console session for the first bring-up. `start.sh` deliberately detaches
+> itself (logging to `/var/log/mementum-start.log`) so the bring-up finishes even
+> after your wlan0 session drops. To temporarily get normal Wi-Fi back for
+> maintenance: `sudo ./raspberry/stop.sh --release-wlan0`.
 
 ## Run
 
@@ -69,10 +91,14 @@ After boot, ESP32 clients associate to `mementumLED` and reach the server at
 | `install.sh`                      | One-shot installer (idempotent)                  |
 | `start.sh` / `stop.sh`            | Bring the AP + server up / down now              |
 | `status.sh`                       | Service + network + queue status                 |
+| `ap-prepare.sh`                   | Release `wlan0` from NM/wpa_supplicant + set IP  |
 | `requirements.txt`                | Python deps for `server.py`                      |
 | `config/hostapd.conf`             | Access point (SSID/PSK/channel)                  |
 | `config/dnsmasq.conf`             | DHCP range + DNS for the AP subnet               |
 | `config/dhcpcd.append.conf`       | Static `10.10.10.1` for `wlan0`                  |
+| `config/networkmanager-unmanaged.conf` | Marks `wlan0` unmanaged (Bookworm)          |
+| `systemd/hostapd.dropin.conf`     | Runs `ap-prepare` before hostapd                 |
+| `systemd/dnsmasq.dropin.conf`     | Gates DHCP on the AP being up                    |
 | `systemd/mementum-server.service` | Boot-into-server unit                            |
 
 ## Notes
