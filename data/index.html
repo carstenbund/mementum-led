@@ -87,6 +87,23 @@
             max-height: 150px;
             overflow-y: auto;
         }
+        /* Status / debug panel */
+        table.clients { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .clients th, .clients td { border: 1px solid #ddd; padding: 4px 7px; text-align: left; }
+        .clients th { background: #333; color: #fff; }
+        .clients tr.row-off { color: #999; }
+        .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+        .dot.on { background: #2ecc40; }
+        .dot.off { background: #bbb; }
+        .controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+        .controls label { display: flex; align-items: center; gap: 5px; font-size: 13px; }
+        #logWindow {
+            background: #111; color: #ddd; font-family: monospace; font-size: 12px;
+            height: 240px; overflow-y: auto; padding: 8px; border-radius: 3px; white-space: pre-wrap;
+        }
+        #logWindow .log-info  { color: #7CFC00; }
+        #logWindow .log-debug { color: #6cb6ff; }
+        .muted { font-size: 13px; color: #777; font-weight: normal; }
     </style>
 </head>
 <body>
@@ -166,6 +183,24 @@
         }
 
 
+        // "Play again": reset the play count for the checkmarked stored strings so the
+        // sequencer schedules them again. Mirrors the firmware's /resetPlayCount handler
+        // (with no selection it resets all, exactly like the C++ version).
+        function playAgain() {
+            var selectedIndexes = [];
+            var checkboxes = document.querySelectorAll('#sentStringsList input[type="checkbox"]');
+            checkboxes.forEach(function(checkbox, index) {
+                if (checkbox.checked) selectedIndexes.push(index);
+            });
+            var url = '/resetPlayCount';
+            if (selectedIndexes.length > 0) {
+                url += '?indexes=' + selectedIndexes.join(',');
+            }
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.send();
+        }
+
         function fetchSentStrings() {
             var xhr = new XMLHttpRequest();
             xhr.open('GET', '/getData', true);
@@ -215,9 +250,90 @@
             });
         }
 
+        // ---- Status window + debug log stream (Pi server only; degrades on firmware) ----
+        var showDebug = false;
+        var logPaused = false;
+        var evtSource = null;
+        var statusTimer = null;
+
+        function fmtTime(epoch) {
+            if (!epoch) return '-';
+            return new Date(epoch * 1000).toLocaleTimeString();
+        }
+        function fmtAge(sec) {
+            sec = Math.round(sec);
+            if (sec < 60) return sec + 's';
+            var m = Math.floor(sec / 60), s = sec % 60;
+            if (m < 60) return m + 'm ' + s + 's';
+            return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+        }
+
+        function fetchClients() {
+            fetch('/clients').then(function(r) {
+                if (!r.ok) throw new Error('no /clients');
+                return r.json();
+            }).then(renderClients).catch(function() {
+                // Endpoint not available (e.g. ESP32-hosted server): hide the panel.
+                var p = document.getElementById('statusSection');
+                if (p) p.style.display = 'none';
+                if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+            });
+        }
+
+        function renderClients(data) {
+            var tb = document.getElementById('clientsBody');
+            tb.innerHTML = '';
+            var connected = 0;
+            data.clients.forEach(function(c) {
+                if (c.active) connected++;
+                var tr = document.createElement('tr');
+                if (!c.active) tr.className = 'row-off';
+                tr.innerHTML =
+                    '<td><span class="dot ' + (c.active ? 'on' : 'off') + '"></span></td>' +
+                    '<td>' + c.id + '</td>' +
+                    '<td>' + c.ip + '</td>' +
+                    '<td>' + c.version + '</td>' +
+                    '<td>' + fmtTime(c.first_seen) + '</td>' +
+                    '<td>' + fmtTime(c.last_seen) + '</td>' +
+                    '<td>' + (c.active ? 'connected' : ('gone ' + fmtAge(c.age) + ' ago')) + '</td>';
+                tb.appendChild(tr);
+            });
+            document.getElementById('clientsSummary').textContent =
+                connected + ' connected / ' + data.clients.length + ' known';
+        }
+
+        function appendLog(ev) {
+            if (logPaused) return;
+            if (ev.level === 'debug' && !showDebug) return;
+            var w = document.getElementById('logWindow');
+            var atBottom = (w.scrollHeight - w.clientHeight - w.scrollTop) < 30;
+            var line = document.createElement('div');
+            line.className = 'log-' + ev.level;
+            line.textContent = ev.t + '  ' + ev.msg;
+            w.appendChild(line);
+            while (w.childNodes.length > 500) w.removeChild(w.firstChild);
+            if (atBottom) w.scrollTop = w.scrollHeight;
+        }
+
+        function connectLog() {
+            if (!window.EventSource) return;          // very old browser
+            evtSource = new EventSource('/logstream');
+            evtSource.onmessage = function(e) {
+                try { appendLog(JSON.parse(e.data)); } catch (_) {}
+            };
+            // onerror: EventSource auto-reconnects; nothing to do.
+        }
+
+        function toggleDebug(cb) { showDebug = cb.checked; }
+        function togglePause(cb) { logPaused = cb.checked; }
+        function clearLog() { document.getElementById('logWindow').innerHTML = ''; }
+
         window.onload = function() {
             fetchSentStrings();
             fetchPreMadeStrings();
+            fetchClients();
+            statusTimer = setInterval(fetchClients, 2000);
+            connectLog();
         };
     </script>
     <div class="header">
@@ -244,6 +360,8 @@
             <div id="sentStringsList" class="sent-strings-list">
                 <!-- Sent strings will be populated here -->
             </div>
+            <p></p>
+            <button value="PlayAgain" id="btnPlayAgain" onclick="playAgain()">Nochmal abspielen</button>
         </div>
         <div class="pre-made-container">
             <h3>Vorgaben:</h3>
@@ -255,6 +373,27 @@
             <button value="RGBOn" id="btn2" onclick="ledSwitch(2)">RGB On</button>
             <button value="RGBOff" id="btn3" onclick="ledSwitch(3)">RGB Off</button>
         </div>
+    </div>
+
+    <div class="container" id="statusSection">
+        <h3>Status <span id="clientsSummary" class="muted"></span></h3>
+        <table class="clients">
+            <thead>
+                <tr>
+                    <th></th><th>ID</th><th>IP</th><th>Ver</th>
+                    <th>First seen</th><th>Last seen</th><th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="clientsBody"></tbody>
+        </table>
+
+        <h3>Debug Log</h3>
+        <div class="controls">
+            <label><input type="checkbox" onchange="toggleDebug(this)"> Show debug (heartbeats &amp; acks)</label>
+            <label><input type="checkbox" onchange="togglePause(this)"> Pause</label>
+            <button onclick="clearLog()">Clear</button>
+        </div>
+        <div id="logWindow"></div>
     </div>
 </body>
 </html>
