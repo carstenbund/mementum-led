@@ -19,6 +19,7 @@ client limit of the ESP32 soft-AP.
 """
 
 from flask import Flask, request, jsonify, send_from_directory
+from concurrent.futures import ThreadPoolExecutor
 import time
 import threading
 import requests
@@ -34,6 +35,13 @@ SCROLL_INTERVAL_MS = 120      # ms per pixel step (SCROLL_INTERVAL_MS)
 DISPLAY_LEAD_MS = 2000        # lead time before a scheduled start (DISPLAY_LEAD_MS)
 MATRIX_WIDTH = 8              # Matrix.width()
 BROADCAST_TIMEOUT = 2.0       # seconds per /play request (firmware uses 2000 ms)
+
+# Unlike the ESP32 (a single radio + sequential tasks, where fan-out time grows with the
+# client count and capped practical use near ~20), the dedicated server pushes to all
+# clients concurrently. Fan-out time then stays ~flat at the slowest single client
+# instead of N * BROADCAST_TIMEOUT, so it comfortably fits inside DISPLAY_LEAD_MS even
+# for many clients. Raise this with the client count; it bounds peak concurrent sockets.
+BROADCAST_WORKERS = 64
 
 PREMADE_STRINGS = ["Hello World", "Temperature: 25C", "Status: OK",
                    "Error: None", "Action: Start"]
@@ -101,29 +109,46 @@ def add_sent_string(s):
 
 
 # ---- Outbound broadcasts to clients ----
+# Shared pool so all clients are contacted concurrently; total fan-out time stays close
+# to the slowest single client rather than the sum over every client (see BROADCAST_WORKERS).
+_broadcast_pool = ThreadPoolExecutor(max_workers=BROADCAST_WORKERS,
+                                     thread_name_prefix="broadcast")
+
+
+def _get_client(ip, route, params):
+    try:
+        r = requests.get("http://%s%s" % (ip, route), params=params, timeout=BROADCAST_TIMEOUT)
+        return 200 <= r.status_code < 300, r.status_code
+    except requests.RequestException as e:
+        return False, str(e)
+
+
+def _broadcast(route, params, targets):
+    """Fan a request out to every client in parallel and wait for all to finish/time out."""
+    if not targets:
+        return
+    futures = {ip: _broadcast_pool.submit(_get_client, ip, route, params)
+               for ip, _cid in targets}
+    by_ip = dict(targets)
+    ok = 0
+    for ip, fut in futures.items():
+        success, info = fut.result()  # bounded by BROADCAST_TIMEOUT
+        if success:
+            ok += 1
+        else:
+            print("Broadcast %s FAILED to client ID=%s, IP=%s: %s"
+                  % (route, by_ip.get(ip), ip, info))
+    print("Broadcast %s -> %d/%d clients OK" % (route, ok, len(targets)))
+
+
 def broadcast_play(seq, text, display_at, targets):
-    """Push a timed /play command to each client, sequentially (mirrors broadcastTask)."""
-    for ip, cid in targets:
-        try:
-            r = requests.get("http://%s/play" % ip,
-                             params={'seq': seq, 'at': display_at, 'data': text},
-                             timeout=BROADCAST_TIMEOUT)
-            if 200 <= r.status_code < 300:
-                print("Broadcast OK to client ID=%d, IP=%s, seq=%d" % (cid, ip, seq))
-            else:
-                print("Broadcast FAILED to client ID=%d, IP=%s, code=%d"
-                      % (cid, ip, r.status_code))
-        except requests.RequestException as e:
-            print("Broadcast FAILED to client ID=%d, IP=%s: %s" % (cid, ip, e))
+    """Push a timed /play command to all clients concurrently."""
+    _broadcast("/play", {'seq': seq, 'at': display_at, 'data': text}, targets)
 
 
 def broadcast_simple(route, targets):
-    """GET a parameterless route (e.g. /clear) on each client."""
-    for ip, cid in targets:
-        try:
-            requests.get("http://%s%s" % (ip, route), timeout=BROADCAST_TIMEOUT)
-        except requests.RequestException as e:
-            print("Broadcast %s FAILED to ID=%d, IP=%s: %s" % (route, cid, ip, e))
+    """GET a parameterless route (e.g. /clear) on all clients concurrently."""
+    _broadcast(route, None, targets)
 
 
 def snapshot_targets():
