@@ -11,6 +11,9 @@ WorkingDirectory=__INSTALL_DIR__
 ExecStart=__PYTHON__ __INSTALL_DIR__/server.py
 Restart=on-failure
 RestartSec=3
+# Stream print() output to journald live (otherwise Python buffers stdout under systemd
+# and `journalctl -u mementum-server -f` shows nothing until the buffer fills).
+Environment=PYTHONUNBUFFERED=1
 # server.py binds port 80, which needs privilege.
 User=root
 

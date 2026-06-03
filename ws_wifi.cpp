@@ -149,7 +149,9 @@ void broadcastPlay(uint32_t seq, const String &text, uint32_t displayAt) {
 
 void registerWithServer() {
     HTTPClient http;
-    String registerEndpoint = serverAddress + "/register";
+    // Report the firmware version so the server log shows which protocol each client
+    // speaks. Old (pre-/play) firmware omits this param; the server treats it as optional.
+    String registerEndpoint = serverAddress + "/register?version=" + urlEncode(String(Version));
     http.begin(registerEndpoint);
 
     int httpCode = http.GET();

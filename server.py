@@ -20,9 +20,19 @@ client limit of the ESP32 soft-AP.
 
 from flask import Flask, request, jsonify, send_from_directory
 from concurrent.futures import ThreadPoolExecutor
+import sys
 import time
 import threading
 import requests
+
+# Stream logs live: under systemd, Python block-buffers stdout (pipe, not a TTY), so
+# print() output would not reach journald until the buffer fills. Line buffering makes
+# `journalctl -u mementum-server -f` show activity as it happens.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except AttributeError:
+    pass  # Python < 3.7
 
 app = Flask(__name__)
 
@@ -199,16 +209,26 @@ def clear():
 def register():
     global next_client_id
     ip = request.remote_addr
+    # Optional: new firmware (>=1.3) reports its version; old (pre-/play) firmware omits it.
+    version = request.args.get('version', '?')
     now = time.time()
     with state_lock:
         if ip not in registered_clients:
             # Monotonic IDs, never reused after cleanup (mirrors firmware fix).
-            registered_clients[ip] = {'id': next_client_id, 'last_seen': now}
-            response = "Registered successfully. Your ID: %d" % next_client_id
+            cid = next_client_id
+            registered_clients[ip] = {'id': cid, 'last_seen': now, 'version': version}
             next_client_id += 1
+            response = "Registered successfully. Your ID: %d" % cid
+            print("REGISTER  new   ID=%d IP=%s version=%s" % (cid, ip, version))
         else:
-            registered_clients[ip]['last_seen'] = now
-            response = "Already registered. Your ID: %d" % registered_clients[ip]['id']
+            client = registered_clients[ip]
+            client['last_seen'] = now
+            client['version'] = version
+            response = "Already registered. Your ID: %d" % client['id']
+            print("REGISTER  again ID=%d IP=%s version=%s" % (client['id'], ip, version))
+    if version == '?':
+        print("  WARNING: client IP=%s reports no version -> likely OLD firmware that "
+              "does not support timed /play; reflash to >=1.3 or it will show no text." % ip)
     return response
 
 
@@ -330,6 +350,10 @@ def sequencer():
             time.sleep(0.05)  # idle: nothing to play or all plays exhausted
             continue
 
+        print("PLAY      seq=%d at=%d now=%d targets=%d text=%r"
+              % (seq, display_at, server_now(), len(targets), text))
+        if not targets:
+            print("  (no registered clients to receive this /play)")
         broadcast_play(seq, text, display_at, targets)
         # Wait the lead-in plus the scroll so the next /play arrives after this one ends.
         time.sleep((DISPLAY_LEAD_MS + scroll_duration_ms(text)) / 1000.0)

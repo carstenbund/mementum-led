@@ -5,7 +5,7 @@
 #include <SPIFFS.h>
 
 char Project[20] = "mementumLED";
-char Version[20] = "1.2";
+char Version[20] = "1.3";
 
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
@@ -154,11 +154,10 @@ void setup() {
     // Initialize RGB Matrix
     Matrix_Init();
     clearSentStrings();
-    if (isAPMode){
-      displayText("  mementumLED server 1.2");
-    } else{
-      displayText("  mementumLED client 1.2");
-    }
+    // Build the banner from Version so the displayed/flashed version can never drift
+    // from the protocol again (old 1.2 spoke a different /play protocol than the server).
+    String banner = String("  ") + Project + (isAPMode ? " server " : " client ") + Version;
+    displayText(banner.c_str());
 }
 
 // Main loop

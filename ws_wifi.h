@@ -16,6 +16,8 @@ extern volatile bool Flow_Flag;
 extern char Text[100];
 extern char currentStringBuffer[100];
 
+extern char Version[20];   // firmware version, reported to the server on /register
+
 extern char apSSID[64];
 extern char apPSK[64];
 
