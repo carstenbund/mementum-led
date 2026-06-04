@@ -480,6 +480,7 @@
         function clearLog() { document.getElementById('logWindow').innerHTML = ''; }
 
         window.onload = function() {
+            fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000));
             fetchSentStrings();
             fetchPreMadeStrings();
             fetchFragments();

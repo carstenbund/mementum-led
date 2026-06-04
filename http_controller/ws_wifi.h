@@ -42,6 +42,7 @@ extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
 // Compact FIFO queue state plus per-entry play counts
 extern int playCount[MAX_SENT_STRINGS];
 extern int max_plays;
+extern int default_plays;
 extern bool isDisplaying;
 
 extern Adafruit_NeoMatrix Matrix;

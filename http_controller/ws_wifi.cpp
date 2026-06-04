@@ -14,7 +14,7 @@ String serverAddress = "http://10.10.10.1"; // Server address for registration a
 unsigned long lastHeartbeat = 0; // Tracks the last time the heartbeat was sent
 const unsigned long heartbeatInterval = 30000; // Heartbeat interval in milliseconds (30 seconds)
 
-const unsigned long HEARTBEAT_TIMEOUT = 80000; // 2 minutes in milliseconds
+const unsigned long HEARTBEAT_TIMEOUT = 90000; // 3× heartbeat interval — cleans up after 3 missed beats
 unsigned long lastCleanup = 0;                 // Last cleanup time
 const unsigned long CLEANUP_INTERVAL = 30000;  // Cleanup interval (30 seconds)
 
@@ -33,10 +33,23 @@ uint32_t serverNow() {
 
 uint32_t globalSeq = 0; // monotonic schedule sequence number (server side)
 
+// Wall-clock anchor: set once when the browser pushes its Date.now() via /setBrowserTime.
+// Allows millis()-based timestamps to be expressed as real Unix epoch seconds.
+static uint32_t epochBase   = 0; // real Unix seconds at anchor point
+static uint32_t millisBase  = 0; // millis() at anchor point
+
+// Convert any millis() value to a Unix epoch second.
+// Returns 0 if the browser hasn't set the anchor yet.
+static uint32_t toEpoch(uint32_t ms) {
+    if (epochBase == 0) return 0;
+    return epochBase + (ms - millisBase) / 1000;
+}
+
 struct registeredClient {
     IPAddress ip;
     int id;
-    uint32_t timestamp; // Last known activity time
+    uint32_t firstSeen;  // millis() at registration
+    uint32_t lastSeen;   // millis() at last heartbeat
 };
 
 std::vector<registeredClient> registeredClients;
@@ -246,12 +259,12 @@ void handleRegister() {
         // Assign a new monotonic ID. Using the vector size would reuse IDs after a
         // cleanup erases an entry, causing ID collisions and heartbeat mismatches.
         int newId = nextClientId++;
-        registeredClients.push_back({clientIP, newId, currentTime});
+        registeredClients.push_back({clientIP, newId, currentTime, currentTime});
         printf("New client registered: ID=%d, IP=%s\r\n", newId, clientIP.toString().c_str());
         server.send(200, "text/plain", "Registered successfully. Your ID: " + String(newId));
     } else {
-        // Update timestamp for existing client
-        it->timestamp = currentTime;
+        // Update lastSeen for existing client
+        it->lastSeen = currentTime;
         printf("Updated client: ID=%d, IP=%s\r\n", it->id, clientIP.toString().c_str());
         server.send(200, "text/plain", "Already registered. Your ID: " + String(it->id));
     }
@@ -266,7 +279,7 @@ void handleHeartbeat() {
         [&](const registeredClient &client) { return client.ip == clientIP; });
 
     if (it != registeredClients.end()) {
-        it->timestamp = millis();
+        it->lastSeen = millis();
         printf("Heartbeat from client ID=%d, IP=%s\n", it->id, clientIP.toString().c_str());
         server.send(200, "text/plain", "Heartbeat acknowledged.");
     } else {
@@ -275,8 +288,6 @@ void handleHeartbeat() {
         server.send(400, "text/plain", "Unknown client. Please re-register.");
     }
 }
-
-unsigned long dynamicHeartbeatInterval = heartbeatInterval;
 
 void sendHeartbeat() {
     if (serverAddress.isEmpty() || clientId == -1 || !isConnected) {
@@ -296,10 +307,8 @@ void sendHeartbeat() {
     // must drop the connection flag and re-register on the next loop.
     if (httpCode >= 200 && httpCode < 300) {
         printf("Heartbeat acknowledged: %s\n", http.getString().c_str());
-        dynamicHeartbeatInterval = heartbeatInterval; // Reset interval on success
     } else {
         printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-        dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
         clientId = -1;        // Force re-registration to get a fresh ID
         // Do NOT clear isConnected here — WiFi is still up, only the HTTP server
         // went away. The server-reachability retry in WIFI_Loop() handles recovery.
@@ -315,7 +324,7 @@ void cleanupStaleClients() {
 
     // Iterate through the registered clients and remove stale ones
     for (auto it = registeredClients.begin(); it != registeredClients.end();) {
-        if (currentMillis - it->timestamp > HEARTBEAT_TIMEOUT) {
+        if (currentMillis - it->lastSeen > HEARTBEAT_TIMEOUT) {
             printf("Removing stale client: ID=%d, IP=%s\n", it->id, it->ip.toString().c_str());
             it = registeredClients.erase(it); // Remove the stale client
         } else {
@@ -554,6 +563,74 @@ void handleSwitch(uint8_t ledNumber) {
 //void handleSendData()  { handleSwitch(1); }
 void handleRGBOn()     { handleSwitch(2); }
 void handleRGBOff()    { handleSwitch(3); }
+
+// /setBrowserTime?epoch=N — anchor the ESP32's millis() to real wall time.
+// Only updates the anchor if not yet set, or if the browser time diverges by
+// more than 60 seconds from the current estimate (drift / server reboot).
+void handleSetBrowserTime() {
+    if (server.hasArg("epoch")) {
+        uint32_t incoming = (uint32_t)server.arg("epoch").toInt();
+        uint32_t estimated = (epochBase == 0) ? 0 : toEpoch(millis());
+        int32_t  drift = (int32_t)(incoming - estimated);
+        if (epochBase == 0 || drift < -60 || drift > 60) {
+            epochBase  = incoming;
+            millisBase = millis();
+            printf("Browser time anchored: epoch=%lu (drift=%lds)\n",
+                   (unsigned long)epochBase, (long)drift);
+        } else {
+            printf("Browser time OK (drift=%lds, no update)\n", (long)drift);
+        }
+    }
+    server.send(200, "text/plain", "ok");
+}
+
+// /clients — return registered client list so the UI status table populates.
+void handleClients() {
+    uint32_t now = millis();
+    String json = "{\"clients\":[";
+    for (size_t i = 0; i < registeredClients.size(); i++) {
+        const auto &c = registeredClients[i];
+        uint32_t age = now - c.lastSeen;
+        bool active = age < HEARTBEAT_TIMEOUT;
+        if (i > 0) json += ",";
+        json += "{\"id\":" + String(c.id) +
+                ",\"ip\":\"" + c.ip.toString() + "\"" +
+                ",\"version\":\"\"" +
+                ",\"active\":" + (active ? "true" : "false") +
+                ",\"age\":" + String(age / 1000) +
+                ",\"first_seen\":" + String(toEpoch(c.firstSeen)) +
+                ",\"last_seen\":"  + String(toEpoch(c.lastSeen))  + "}";
+    }
+    json += "]}";
+    server.send(200, "application/json", json);
+}
+
+// /getConfig — return the play ceiling and default preset so the UI config section loads.
+void handleGetConfig() {
+    String json = "{\"max_plays\":" + String(max_plays) +
+                  ",\"default_plays\":" + String(default_plays) + "}";
+    server.send(200, "application/json", json);
+}
+
+// /setMaxPlays?value=N — update the global ceiling at runtime.
+void handleSetMaxPlays() {
+    if (server.hasArg("value")) {
+        int v = server.arg("value").toInt();
+        if (v >= 1 && v <= 99) max_plays = v;
+    }
+    String json = "{\"max_plays\":" + String(max_plays) + "}";
+    server.send(200, "application/json", json);
+}
+
+// /setDefaultPlays?value=N — update the per-string preset at runtime.
+void handleSetDefaultPlays() {
+    if (server.hasArg("value")) {
+        int v = server.arg("value").toInt();
+        if (v >= 1 && v <= 99) default_plays = v;
+    }
+    String json = "{\"default_plays\":" + String(default_plays) + "}";
+    server.send(200, "application/json", json);
+}
 unsigned long retryDelay = 1000; // Start with 1 second
 const unsigned long maxRetryDelay = 32000; // Cap at 32 seconds
 
@@ -873,8 +950,13 @@ void WIFI_Init()
   server.on("/clear", handleClearStrings);
   server.on("/deleteSelected", handleDeleteSelected);
   server.on("/resetPlayCount", handleResetPlayCount);
-  server.on("/time", handleTime);   // shared-clock reference (server) / sync source (client)
-  server.on("/play", handlePlay);   // timed display command received by clients
+  server.on("/time",            handleTime);         // shared-clock reference
+  server.on("/play",            handlePlay);         // timed display command for clients
+  server.on("/clients",         handleClients);      // registered client list → status table
+  server.on("/setBrowserTime",  handleSetBrowserTime); // anchor millis() to real wall time
+  server.on("/getConfig",       handleGetConfig);    // {max_plays, default_plays}
+  server.on("/setMaxPlays",     handleSetMaxPlays);  // update global ceiling
+  server.on("/setDefaultPlays", handleSetDefaultPlays); // update per-string preset
 
 
   // Endpoint to retrieve pre-made strings

@@ -5,7 +5,7 @@
 #include <SPIFFS.h>
 
 char Project[20] = "mementumLED";
-char Version[20] = "1.4";
+char Version[20] = "1.4.2";
 
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
@@ -24,7 +24,8 @@ volatile bool Flow_Flag = false; // Flow flag for display logic
 String sentStrings[MAX_SENT_STRINGS];
 int sentCount = 0;
 
-int max_plays = 3;
+int max_plays     = 3; // global ceiling — no string ever plays more than this
+int default_plays = 3; // preset used when no per-string count is specified
 
 char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Hello World",
