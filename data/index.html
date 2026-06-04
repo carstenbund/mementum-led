@@ -209,6 +209,35 @@
             xhr.send();
         }
 
+        // Playback repeat count (server-side MAX_PLAYS): how often each message plays
+        // before the sequencer considers it exhausted. Reflected live across all clients.
+        function fetchMaxPlays() {
+            fetch('/getMaxPlays').then(function(r) {
+                return r.ok ? r.json() : null;
+            }).then(function(d) {
+                if (d) document.getElementById('maxPlays').value = d.max_plays;
+            }).catch(function() {});
+        }
+
+        function setMaxPlays() {
+            var input = document.getElementById('maxPlays');
+            var status = document.getElementById('maxPlaysStatus');
+            var v = parseInt(input.value, 10);
+            if (isNaN(v) || v < 1 || v > 99) {
+                status.textContent = 'ungültig (1–99)';
+                return;
+            }
+            fetch('/setMaxPlays?value=' + v).then(function(r) {
+                return r.ok ? r.json() : Promise.reject();
+            }).then(function(d) {
+                input.value = d.max_plays;
+                status.textContent = 'gespeichert';
+                setTimeout(function() { status.textContent = ''; }, 1500);
+            }).catch(function() {
+                status.textContent = 'Fehler';
+            });
+        }
+
         function fetchSentStrings() {
             var xhr = new XMLHttpRequest();
             xhr.open('GET', '/getData', true);
@@ -407,6 +436,7 @@
             fetchSentStrings();
             fetchPreMadeStrings();
             fetchFragments();
+            fetchMaxPlays();
             fetchClients();
             statusTimer = setInterval(fetchClients, 2000);
             connectLog();
@@ -438,6 +468,12 @@
             </div>
             <p></p>
             <button value="PlayAgain" id="btnPlayAgain" onclick="playAgain()">Nochmal abspielen</button>
+            <div class="frag-row" style="margin-top: 8px; align-items: center;">
+                <label for="maxPlays">Wiederholungen:</label>
+                <input type="number" id="maxPlays" min="1" max="99" step="1" style="width: 4em;"
+                       onchange="setMaxPlays()">
+                <span id="maxPlaysStatus" class="muted"></span>
+            </div>
         </div>
         <div class="pre-made-container">
             <h3>Vorgaben:</h3>

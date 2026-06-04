@@ -43,7 +43,9 @@ app = Flask(__name__)
 
 # ---- Configuration (mirrors ws_wifi.h / ws_flow.h) ----
 MAX_SENT_STRINGS = 5          # compact FIFO depth (matches firmware)
-MAX_PLAYS = 3                 # max_plays in firmware
+MAX_PLAYS = 3                 # max_plays in firmware (live-adjustable via /setMaxPlays)
+MIN_MAX_PLAYS = 1             # lower bound for the live-adjustable play count
+MAX_MAX_PLAYS = 99           # upper bound (sanity cap)
 HEARTBEAT_TIMEOUT = 80        # seconds (HEARTBEAT_TIMEOUT)
 CLEANUP_INTERVAL = 30         # seconds (CLEANUP_INTERVAL)
 SCROLL_INTERVAL_MS = 120      # ms per pixel step (SCROLL_INTERVAL_MS)
@@ -484,6 +486,30 @@ def reset_play_count():
             if 0 <= idx < n:
                 play_counts[idx] = 0
     return "Play counts reset.", 200
+
+
+@app.route("/getMaxPlays")
+def get_max_plays():
+    # Current playback repeat count (how often each message plays before it's exhausted).
+    return jsonify({"max_plays": MAX_PLAYS})
+
+
+@app.route("/setMaxPlays")
+def set_max_plays():
+    # Live-adjust the repeat count. The sequencer reads MAX_PLAYS on each iteration,
+    # so the new value takes effect immediately: raising it lets already-exhausted
+    # messages play again, lowering it stops messages already over the new cap.
+    global MAX_PLAYS
+    raw = request.args.get("value", "")
+    if not raw.lstrip("-").isdigit():
+        return "Missing or non-numeric value parameter.", 400
+    value = int(raw)
+    if value < MIN_MAX_PLAYS or value > MAX_MAX_PLAYS:
+        return "Value out of range (%d..%d)." % (MIN_MAX_PLAYS, MAX_MAX_PLAYS), 400
+    with state_lock:
+        MAX_PLAYS = value
+    log.emit("CONFIG    max_plays -> %d" % value)
+    return jsonify({"max_plays": MAX_PLAYS})
 
 
 @app.route("/deleteSelected")
