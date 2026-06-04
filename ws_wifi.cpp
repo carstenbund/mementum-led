@@ -301,7 +301,8 @@ void sendHeartbeat() {
         printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
         dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
         clientId = -1;        // Force re-registration to get a fresh ID
-        isConnected = false;
+        // Do NOT clear isConnected here — WiFi is still up, only the HTTP server
+        // went away. The server-reachability retry in WIFI_Loop() handles recovery.
     }
     http.end();
 }
@@ -571,20 +572,8 @@ bool connectToServer() {
 
     if (WiFi.status() == WL_CONNECTED) {
         printf("\nConnected to WiFi. IP Address: %s\n", WiFi.localIP().toString().c_str());
-
-        // Register with the server; this is the real test of server reachability.
-        // WiFi being up does not mean the HTTP server is up (e.g. server rebooted
-        // while the AP stayed alive), so only declare success if we got a client ID.
-        registerWithServer();
-        if (clientId == -1) {
-            retryDelay = min(retryDelay * 2, maxRetryDelay);
-            printf("Server unreachable (registration failed). Retrying in %lu ms...\n", retryDelay);
-            return false;
-        }
-
-        retryDelay = 1000; // Reset delay after full success
+        retryDelay = 1000; // Reset delay after successful WiFi connection
         isConnected = true;
-        syncClock();
         return true;
     } else {
         retryDelay = min(retryDelay * 2, maxRetryDelay); // Exponential backoff
@@ -705,14 +694,30 @@ void WIFI_Loop() {
 
     if (!isAPMode) {
         if (!isConnected) {
-            // Gate reconnect attempts using the same retryDelay used inside
-            // connectToServer() so we honour the exponential backoff instead of
-            // calling registerWithServer() on every loop() iteration.
-            static unsigned long lastReconnectAttempt = 0;
-            if (currentMillis - lastReconnectAttempt >= retryDelay) {
-                lastReconnectAttempt = currentMillis;
+            // WiFi layer is down — retry the physical connection with backoff.
+            static unsigned long lastWiFiRetry = 0;
+            if (currentMillis - lastWiFiRetry >= retryDelay) {
+                lastWiFiRetry = currentMillis;
                 if (connectToServer()) {
-                    printf("Reconnected successfully.\n");
+                    printf("WiFi reconnected.\n");
+                }
+            }
+        } else if (clientId == -1) {
+            // WiFi is up but we lost the server registration (server restarted,
+            // heartbeat rejected, etc.). Retry registration independently with
+            // its own backoff so WiFi state is not touched.
+            static unsigned long lastServerRetry = 0;
+            static unsigned long serverRetryDelay = 1000;
+            if (currentMillis - lastServerRetry >= serverRetryDelay) {
+                lastServerRetry = currentMillis;
+                registerWithServer();
+                if (clientId != -1) {
+                    serverRetryDelay = 1000; // reset on success
+                    syncClock();
+                    printf("Re-registered with server.\n");
+                } else {
+                    serverRetryDelay = min(serverRetryDelay * 2, maxRetryDelay);
+                    printf("Server still unreachable. Retrying in %lu ms...\n", serverRetryDelay);
                 }
             }
         }
