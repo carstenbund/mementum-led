@@ -22,7 +22,14 @@ extern char apSSID[64];
 extern char apPSK[64];
 
 extern String serverAddress;
+// Kept in sync with the elected role (true only while this node is the SoftAP server) so
+// existing server-only branches (e.g. handleClearStrings broadcasting) keep working.
 extern bool isAPMode;
+
+// Role-agnostic failover: every node runs the same state machine and elects a single
+// SoftAP "server" at runtime from its MAC-derived rank. See docs/failover-design.md.
+enum NodeRole { ROLE_JOINING, ROLE_CLIENT, ROLE_CANDIDATE, ROLE_SERVER };
+extern NodeRole nodeRole;
 
 #define MAX_SENT_STRINGS 5
 extern String sentStrings[MAX_SENT_STRINGS];

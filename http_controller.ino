@@ -66,7 +66,8 @@ void loadConfigFromCSV() {
             } else if (key == "APPSK") {
                 value.toCharArray(apPSK, sizeof(apPSK));
             } else if (key == "isAPMode") {
-                isAPMode = (value == "true");
+                // Ignored: the AP/client role is now elected at runtime from the MAC.
+                // See docs/failover-design.md. Kept here so old config.csv files still parse.
             } else if (key == "matrix_rotation") {
                 matrix_rotation = value.toInt();
             } else if (key == "max_plays") {
@@ -156,7 +157,8 @@ void setup() {
     clearSentStrings();
     // Build the banner from Version so the displayed/flashed version can never drift
     // from the protocol again (old 1.2 spoke a different /play protocol than the server).
-    String banner = String("  ") + Project + (isAPMode ? " server " : " client ") + Version;
+    // Role is no longer known at boot (it is elected at runtime), so the banner is neutral.
+    String banner = String("  ") + Project + " node " + Version;
     displayText(banner.c_str());
 }
 
@@ -238,10 +240,27 @@ void clientPlayerLoop() {
     delay(5);
 }
 
+// While electing (no server yet, or contesting after a loss) the node is neither rendering
+// a queue nor a /play schedule, so show a small rotating glyph to signal "configuring /
+// waiting for network" instead of going dark.
+void electionSpinnerLoop() {
+    static const char frames[] = {'|', '/', '-', '\\'};
+    static int frame = 0;
+    static unsigned long lastStep = 0;
+    if (millis() - lastStep < 200) { yield(); delay(5); return; }
+    lastStep = millis();
+    Matrix.fillScreen(0);
+    Matrix.setTextColor(Matrix.Color(128, 128, 0)); // dim "busy" tone
+    Matrix.setCursor(2, 0);
+    Matrix.print(frames[frame]);
+    Matrix.show();
+    frame = (frame + 1) & 3;
+}
+
 void Display_Loop() {
-    if (isAPMode) {
-        serverSequencerLoop();
-    } else {
-        clientPlayerLoop();
+    switch (nodeRole) {
+        case ROLE_SERVER: serverSequencerLoop(); break; // master sequencer
+        case ROLE_CLIENT: clientPlayerLoop();    break; // stateless player
+        default:          electionSpinnerLoop(); break; // JOINING / CANDIDATE
     }
 }
