@@ -571,16 +571,24 @@ bool connectToServer() {
 
     if (WiFi.status() == WL_CONNECTED) {
         printf("\nConnected to WiFi. IP Address: %s\n", WiFi.localIP().toString().c_str());
-        retryDelay = 1000; // Reset delay after successful connection
-        isConnected = true;
 
-        // Register with the server and sync the shared clock
+        // Register with the server; this is the real test of server reachability.
+        // WiFi being up does not mean the HTTP server is up (e.g. server rebooted
+        // while the AP stayed alive), so only declare success if we got a client ID.
         registerWithServer();
+        if (clientId == -1) {
+            retryDelay = min(retryDelay * 2, maxRetryDelay);
+            printf("Server unreachable (registration failed). Retrying in %lu ms...\n", retryDelay);
+            return false;
+        }
+
+        retryDelay = 1000; // Reset delay after full success
+        isConnected = true;
         syncClock();
         return true;
     } else {
         retryDelay = min(retryDelay * 2, maxRetryDelay); // Exponential backoff
-        printf("\nFailed to connect. Retrying in %lu ms...\n", retryDelay);
+        printf("\nFailed to connect to WiFi. Retrying in %lu ms...\n", retryDelay);
         return false;
     }
 }
@@ -696,11 +704,18 @@ void WIFI_Loop() {
     unsigned long currentMillis = millis();
 
     if (!isAPMode) {
-          if (!isConnected) {
+        if (!isConnected) {
+            // Gate reconnect attempts using the same retryDelay used inside
+            // connectToServer() so we honour the exponential backoff instead of
+            // calling registerWithServer() on every loop() iteration.
+            static unsigned long lastReconnectAttempt = 0;
+            if (currentMillis - lastReconnectAttempt >= retryDelay) {
+                lastReconnectAttempt = currentMillis;
                 if (connectToServer()) {
                     printf("Reconnected successfully.\n");
                 }
             }
+        }
       
         // Client Mode: Send heartbeat at intervals and refresh the clock offset
         if (currentMillis - lastHeartbeat >= heartbeatInterval) {
