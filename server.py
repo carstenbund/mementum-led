@@ -43,6 +43,8 @@ app = Flask(__name__)
 
 # ---- Configuration (mirrors ws_wifi.h / ws_flow.h) ----
 MAX_SENT_STRINGS = 5          # compact FIFO depth (matches firmware)
+# These two are seed defaults; the persisted values in SQLite (loaded just after
+# db_init) override them on startup, and the /set* routes write changes back.
 MAX_PLAYS = 3                 # global repeat ceiling (hard cap): no string plays more
                               # than this, regardless of its per-string limit
                               # (effective = min of the two). Live master throttle.
@@ -96,6 +98,10 @@ def db_init():
         if conn.execute("SELECT COUNT(*) FROM fragments").fetchone()[0] == 0:
             conn.executemany("INSERT INTO fragments (text, position) VALUES (?, ?)",
                              [(t, i) for i, t in enumerate(PREMADE_STRINGS)])
+        # Persistent config key/value store (survives server restarts).
+        conn.execute("""CREATE TABLE IF NOT EXISTS config (
+                            key   TEXT PRIMARY KEY,
+                            value INTEGER NOT NULL)""")
 
 
 def db_fragments():
@@ -105,7 +111,23 @@ def db_fragments():
     return [{"id": r["id"], "text": r["text"]} for r in rows]
 
 
+def db_get_config(key, default):
+    with db_connect() as conn:
+        row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def db_set_config(key, value):
+    with db_lock, db_connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                     (key, value))
+
+
 db_init()
+
+# Load persisted config, falling back to the seed defaults defined above on first run.
+MAX_PLAYS = db_get_config("max_plays", MAX_PLAYS)
+DEFAULT_PLAYS = db_get_config("default_plays", DEFAULT_PLAYS)
 
 # ---- Shared state (guarded by state_lock) ----
 state_lock = threading.Lock()
@@ -540,6 +562,7 @@ def set_max_plays():
         return err
     with state_lock:
         MAX_PLAYS = value
+    db_set_config("max_plays", value)
     log.emit("CONFIG    max_plays (ceiling) -> %d" % value)
     return jsonify({"max_plays": MAX_PLAYS})
 
@@ -554,6 +577,7 @@ def set_default_plays():
         return err
     with state_lock:
         DEFAULT_PLAYS = value
+    db_set_config("default_plays", value)
     log.emit("CONFIG    default_plays -> %d" % value)
     return jsonify({"default_plays": DEFAULT_PLAYS})
 
