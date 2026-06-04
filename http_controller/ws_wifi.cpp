@@ -583,8 +583,10 @@ static const uint32_t SERVER_SCAN_INTERVAL = 6000;  // SERVER abdication-check c
 static const uint32_t ABDICATION_WINDOW    = 60000; // only hunt competitors this long after promoting
 static const int      HEARTBEAT_FAIL_N     = 3;     // consecutive heartbeat failures => server lost
 static const uint32_t PROMOTION_COOLDOWN   = 15000; // anti-flap after a promote/abdicate
+static const uint32_t PROMOTION_GRACE_MS   = 5000;  // wait after promoting before broadcasting
 
-static uint32_t roleSince         = 0;     // millis() when we entered the current role
+static uint32_t roleSince         = 0;
+uint32_t serverReadyAt             = 0;  // millis() when the post-promotion grace period ends     // millis() when we entered the current role
 static uint32_t absenceSince      = 0;     // CANDIDATE: when APSSID was first confirmed absent
 static uint32_t promoteAt         = 0;     // CANDIDATE: deadline to promote if still absent
 static uint32_t lastScan          = 0;     // CANDIDATE scan timestamp
@@ -685,6 +687,7 @@ static void enterServer() {
     clearSentStrings();
     clockOffset = 0;
     clockSynced = true;
+    serverReadyAt = millis() + PROMOTION_GRACE_MS;
     delay(100);
     printf("[role] -> SERVER (AP up at %s)\n", apIP.toString().c_str());
 }

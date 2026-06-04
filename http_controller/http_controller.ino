@@ -5,7 +5,7 @@
 #include <SPIFFS.h>
 
 char Project[20] = "mementumLED";
-char Version[20] = "1.3";
+char Version[20] = "1.4";
 
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
@@ -160,7 +160,7 @@ void setup() {
     // Role is no longer known at boot (it is elected at runtime), so the banner is neutral.
     // Render it synchronously (not as a background task): the election spinner also drives
     // the LED matrix from loop(), and two tasks hitting the NeoPixel driver at once crashes.
-    String banner = String("  ") + Project + " node " + Version;
+    String banner = String("  ") + Project + " " + Version;
     char bannerBuf[64];
     banner.toCharArray(bannerBuf, sizeof(bannerBuf));
     xdisplayText(bannerBuf);
@@ -177,7 +177,16 @@ const unsigned long expiredMessageInterval = 5000; // Minimum interval for showi
 // Server (AP) is the master sequencer: it owns the queue, picks the next valid message,
 // schedules a start time, broadcasts a timed /play to all clients, and renders the very
 // same schedule locally so it stays in lockstep with them.
+extern uint32_t serverReadyAt; // set in enterServer(); grace period before first broadcast
+
 void serverSequencerLoop() {
+    // Hold off broadcasting until clients have had time to reconnect after promotion.
+    if (millis() < serverReadyAt) {
+        yield();
+        delay(20);
+        return;
+    }
+
     // A message is currently scheduled/playing: render it until it finishes.
     if (currentSchedule.active) {
         renderScheduled(); // sets active=false when the scroll completes
@@ -262,6 +271,18 @@ void electionSpinnerLoop() {
 }
 
 void Display_Loop() {
+    static NodeRole lastRole = ROLE_JOINING;
+
+    // On role transition from election -> settled role: clear the spinner and announce.
+    if (nodeRole != lastRole) {
+        if (nodeRole == ROLE_SERVER) {
+            xdisplayText((char*)"SERVER");
+        } else if (nodeRole == ROLE_CLIENT) {
+            xdisplayText((char*)"CLIENT");
+        }
+        lastRole = nodeRole;
+    }
+
     switch (nodeRole) {
         case ROLE_SERVER: serverSequencerLoop(); break; // master sequencer
         case ROLE_CLIENT: clientPlayerLoop();    break; // stateless player
