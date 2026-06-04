@@ -292,26 +292,36 @@ def broadcast_play(seq, text, display_at, targets):
     _broadcast("/play", {'seq': seq, 'at': display_at, 'data': text}, targets)
 
 
-def broadcast_play_staggered(seq, text, schedule):
-    """Push /play to each panel with its OWN start time.
+def broadcast_play_each(items):
+    """Push /play to each panel with its OWN params (its own start time and/or text).
 
-    `schedule` is a list of (ip, cid, display_at). All start times are in the shared
-    server clock domain, so each panel renders the same glyph at a different instant and
-    the glyph appears to sweep across the wall. Returns the number of panels that ACKed.
+    `items` is a list of (ip, params). Fans out concurrently and returns the number of
+    panels that ACKed. This is the per-panel cousin of _broadcast(): effects and the
+    identify diagnostic need each panel to receive something different.
     """
-    if not schedule:
+    if not items:
         return 0
-    futures = {ip: _broadcast_pool.submit(_get_client, ip, "/play",
-                                          {'seq': seq, 'at': at, 'data': text})
-               for ip, _cid, at in schedule}
+    futures = {ip: _broadcast_pool.submit(_get_client, ip, "/play", params)
+               for ip, params in items}
     ok = 0
     for ip, fut in futures.items():
         success, info = fut.result()  # bounded by BROADCAST_TIMEOUT
         if success:
             ok += 1
         else:
-            log.emit("EFFECT    play FAILED IP=%s: %s" % (ip, info))
+            log.emit("PLAY-EACH play FAILED IP=%s: %s" % (ip, info))
     return ok
+
+
+def broadcast_play_staggered(seq, text, schedule):
+    """Push the same glyph to each panel at its OWN start time.
+
+    `schedule` is a list of (ip, cid, display_at). All start times are in the shared
+    server clock domain, so each panel renders the same glyph at a different instant and
+    it appears to sweep across the wall.
+    """
+    return broadcast_play_each(
+        [(ip, {'seq': seq, 'at': at, 'data': text}) for ip, _cid, at in schedule])
 
 
 def broadcast_simple(route, targets):
@@ -627,6 +637,73 @@ def effect():
     return jsonify({"status": "ok", "panels": n, "order": [cid for _ip, cid in ordered],
                     "stagger_ms": stagger, "waves": waves, "data": data,
                     "duration_ms": total_ms})
+
+
+IDENTIFY_LEAD_MS = 500   # small lead: ids loop continuously, so keep the blank gap short
+
+
+def run_identify(seconds, repeat, fmt):
+    """Keep each panel showing its OWN id for `seconds` (runs in its own thread).
+
+    Every cycle re-schedules each panel with its id string (a fresh seq, the same start
+    instant for all) so the ids stay on screen continuously while you walk the wall.
+    Re-reads the client list each cycle so a panel that (re)joins mid-run gets labelled too.
+    """
+    global global_seq
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        with state_lock:
+            targets = snapshot_targets()
+            global_seq += 1
+            seq = global_seq
+            at = (server_now() + IDENTIFY_LEAD_MS) & 0xFFFFFFFF
+            items = [(ip, {'seq': seq, 'at': at, 'data': fmt.format(id=cid) * repeat})
+                     for ip, cid in targets]
+        if not items:
+            time.sleep(0.2)
+            continue
+        broadcast_play_each(items)
+        # Pace to the longest id string so every panel finishes before the next cycle.
+        cycle = max(scroll_duration_ms(p['data']) for _ip, p in items)
+        time.sleep((IDENTIFY_LEAD_MS + cycle) / 1000.0)
+    log.emit("IDENTIFY  done")
+
+
+@app.route("/identify")
+def identify():
+    """Diagnostic: show every panel its OWN client id so you can read the physical layout
+    off the wall and build the /effect order= list.
+
+    Query params (all optional):
+      seconds  how long to keep the ids on screen (default 20)
+      repeat   how many times the id string repeats, e.g. 3 -> '0 0 0 ' (default 3)
+      fmt      Python format for one label; {id} is the client id (default '{id} ').
+               e.g. fmt=ID{id}%20 for 'ID0 ', or fmt=%23{id}%20 for '#0 '
+
+    Walk the wall, note each panel's number left-to-right, then drive the sweep with
+    /effect?order=<those ids>. Holds the text sequencer off while it runs.
+    """
+    global effect_until
+    seconds = _int_arg('seconds', 20, lo=1, hi=600)
+    repeat = _int_arg('repeat', 3, lo=1, hi=20)
+    fmt = request.args.get('fmt', '{id} ')
+    # Validate the format string against an injection / bad-field mistake before we loop.
+    try:
+        fmt.format(id=0)
+    except (KeyError, IndexError, ValueError):
+        return jsonify({"status": "error",
+                        "message": "Invalid fmt; use {id}, e.g. '{id} '."}), 400
+
+    with state_lock:
+        targets = snapshot_targets()
+        if not targets:
+            return jsonify({"status": "error", "message": "No active clients."}), 400
+        effect_until = time.monotonic() + seconds  # reuse the sequencer-hold mechanism
+
+    panels = sorted(cid for _ip, cid in targets)
+    log.emit("IDENTIFY  start panels=%d seconds=%d ids=%s" % (len(targets), seconds, panels))
+    threading.Thread(target=run_identify, args=(seconds, repeat, fmt), daemon=True).start()
+    return jsonify({"status": "ok", "panels": panels, "seconds": seconds})
 
 
 @app.route("/RGBOn")
