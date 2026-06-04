@@ -128,8 +128,13 @@
         function sendData() {
             var textData = document.getElementById('Text').value;
             textData = selectedColor + textData;
+            // Attach this string's own repeat count, captured from the input at send
+            // time, so each message can repeat a different number of times.
+            var plays = parseInt(document.getElementById('maxPlays').value, 10);
+            var url = '/SendData?data=' + encodeURIComponent(textData);
+            if (!isNaN(plays)) url += '&plays=' + plays;
             var xhr = new XMLHttpRequest();
-            xhr.open('GET', '/SendData?data=' + encodeURIComponent(textData), true);
+            xhr.open('GET', url, true);
             xhr.onreadystatechange = function() {
                 if (xhr.readyState === 4 && xhr.status === 200) {
                     fetchSentStrings(); // Refresh only after the server stored it
@@ -209,33 +214,16 @@
             xhr.send();
         }
 
-        // Playback repeat count (server-side MAX_PLAYS): how often each message plays
-        // before the sequencer considers it exhausted. Reflected live across all clients.
+        // The "Wiederholungen" box is purely the repeat count for the NEXT string you
+        // send: sendData() reads it and passes &plays=N, so the count is stored per
+        // string. It is NOT a global setting — changing the box affects only future
+        // sends. On load we seed it from the server's fallback default for convenience.
         function fetchMaxPlays() {
             fetch('/getMaxPlays').then(function(r) {
                 return r.ok ? r.json() : null;
             }).then(function(d) {
                 if (d) document.getElementById('maxPlays').value = d.max_plays;
             }).catch(function() {});
-        }
-
-        function setMaxPlays() {
-            var input = document.getElementById('maxPlays');
-            var status = document.getElementById('maxPlaysStatus');
-            var v = parseInt(input.value, 10);
-            if (isNaN(v) || v < 1 || v > 99) {
-                status.textContent = 'ungültig (1–99)';
-                return;
-            }
-            fetch('/setMaxPlays?value=' + v).then(function(r) {
-                return r.ok ? r.json() : Promise.reject();
-            }).then(function(d) {
-                input.value = d.max_plays;
-                status.textContent = 'gespeichert';
-                setTimeout(function() { status.textContent = ''; }, 1500);
-            }).catch(function() {
-                status.textContent = 'Fehler';
-            });
         }
 
         function fetchSentStrings() {
@@ -329,11 +317,17 @@
         function displaySentStrings() {
             var list = document.getElementById('sentStringsList');
             list.innerHTML = '';
-            sentStrings.forEach(function(str, index) {
+            sentStrings.forEach(function(item, index) {
+                // Tolerate both the rich payload ({text,plays,limit}) and a bare string.
+                var text = (item && typeof item === 'object') ? item.text : item;
                 var option = document.createElement('div');
                 option.style.marginBottom = '5px';
-                option.innerHTML = `<input type="checkbox" id="sent${index}" value="${str}">
-                                    <label for="sent${index}">${str}</label>`;
+                var badge = '';
+                if (item && typeof item === 'object') {
+                    badge = ` <span class="muted">(${item.plays}/${item.limit}×)</span>`;
+                }
+                option.innerHTML = `<input type="checkbox" id="sent${index}" value="${text}">
+                                    <label for="sent${index}">${text}</label>${badge}`;
                 list.appendChild(option);
             });
         }
@@ -469,10 +463,8 @@
             <p></p>
             <button value="PlayAgain" id="btnPlayAgain" onclick="playAgain()">Nochmal abspielen</button>
             <div class="frag-row" style="margin-top: 8px; align-items: center;">
-                <label for="maxPlays">Wiederholungen:</label>
-                <input type="number" id="maxPlays" min="1" max="99" step="1" style="width: 4em;"
-                       onchange="setMaxPlays()">
-                <span id="maxPlaysStatus" class="muted"></span>
+                <label for="maxPlays">Wiederholungen (nächster Text):</label>
+                <input type="number" id="maxPlays" min="1" max="99" step="1" value="3" style="width: 4em;">
             </div>
         </div>
         <div class="pre-made-container">

@@ -107,7 +107,10 @@ db_init()
 state_lock = threading.Lock()
 
 sent_strings = []             # compact FIFO of raw texts (may include @color prefix)
-play_counts = []              # parallel to sent_strings
+play_counts = []              # parallel to sent_strings: times each has been shown
+play_limits = []              # parallel to sent_strings: per-string repeat cap (captured
+                              # at send time so each message can repeat a different number
+                              # of times — enables orchestrating patterns)
 cur_index = 0                 # sequencer cursor
 
 # ip -> {'id', 'version', 'first_seen', 'last_seen', 'active'}. Clients are kept
@@ -198,15 +201,23 @@ def scroll_duration_ms(raw):
     return (MATRIX_WIDTH + text_width + 1) * SCROLL_INTERVAL_MS
 
 
-def add_sent_string(s):
+def clamp_plays(value):
+    """Clamp a repeat count into the allowed range."""
+    return max(MIN_MAX_PLAYS, min(MAX_MAX_PLAYS, value))
+
+
+def add_sent_string(s, limit=None):
     """Append to the compact FIFO, dropping the oldest when full and resetting the
-    new slot's play count so the message is actually shown (mirrors addSentString)."""
+    new slot's play count so the message is actually shown (mirrors addSentString).
+    `limit` is this message's own repeat cap; defaults to the server default MAX_PLAYS."""
     global cur_index
     sent_strings.append(s)
     play_counts.append(0)
+    play_limits.append(clamp_plays(MAX_PLAYS if limit is None else limit))
     if len(sent_strings) > MAX_SENT_STRINGS:
         sent_strings.pop(0)
         play_counts.pop(0)
+        play_limits.pop(0)
         cur_index = max(0, cur_index - 1)  # keep the cursor on the same logical item
 
 
@@ -268,7 +279,10 @@ def serve_index():
 @app.route("/getData")
 def get_data():
     with state_lock:
-        return jsonify(list(sent_strings))  # compact order == display order
+        # compact order == display order; include each string's own repeat cap and
+        # how many times it has played so far so the UI can show/orchestrate them.
+        return jsonify([{"text": t, "plays": play_counts[i], "limit": play_limits[i]}
+                        for i, t in enumerate(sent_strings)])
 
 
 @app.route("/getPreMade")
@@ -333,8 +347,12 @@ def delete_fragment():
 def send_data():
     if 'data' not in request.args:
         return jsonify({"status": "error", "message": "No data provided."}), 400
+    # Optional per-string repeat count; falls back to the server default (MAX_PLAYS)
+    # for callers that don't supply one (firmware, curl, older clients).
+    raw_plays = request.args.get('plays', '')
+    limit = clamp_plays(int(raw_plays)) if raw_plays.lstrip('-').isdigit() else None
     with state_lock:
-        add_sent_string(request.args['data'])
+        add_sent_string(request.args['data'], limit)
     # Model A: do not push raw text; the sequencer distributes it via /play.
     return jsonify({"status": "ok", "message": "Command received and processed."})
 
@@ -345,6 +363,7 @@ def clear():
     with state_lock:
         sent_strings.clear()
         play_counts.clear()
+        play_limits.clear()
         cur_index = 0
         targets = snapshot_targets()
     # Tell clients to blank immediately and drop any in-flight schedule.
@@ -490,15 +509,16 @@ def reset_play_count():
 
 @app.route("/getMaxPlays")
 def get_max_plays():
-    # Current playback repeat count (how often each message plays before it's exhausted).
+    # Default repeat count applied to new strings that don't carry their own (the
+    # "next string" value seeded into the UI; each string captures it at send time).
     return jsonify({"max_plays": MAX_PLAYS})
 
 
 @app.route("/setMaxPlays")
 def set_max_plays():
-    # Live-adjust the repeat count. The sequencer reads MAX_PLAYS on each iteration,
-    # so the new value takes effect immediately: raising it lets already-exhausted
-    # messages play again, lowering it stops messages already over the new cap.
+    # Set the default repeat count for newly sent strings. Existing strings keep the
+    # per-string limit they were captured with; this only affects future sends that
+    # don't pass an explicit ?plays= value.
     global MAX_PLAYS
     raw = request.args.get("value", "")
     if not raw.lstrip("-").isdigit():
@@ -524,6 +544,7 @@ def delete_selected():
             if 0 <= idx < len(sent_strings):
                 sent_strings.pop(idx)
                 play_counts.pop(idx)
+                play_limits.pop(idx)
         if cur_index >= len(sent_strings):
             cur_index = 0
     return get_data()
@@ -572,7 +593,7 @@ def sequencer():
                 start = cur_index
                 found = False
                 for _ in range(n):
-                    if play_counts[cur_index] < MAX_PLAYS:
+                    if play_counts[cur_index] < play_limits[cur_index]:
                         found = True
                         break
                     cur_index = (cur_index + 1) % n
