@@ -43,8 +43,11 @@ app = Flask(__name__)
 
 # ---- Configuration (mirrors ws_wifi.h / ws_flow.h) ----
 MAX_SENT_STRINGS = 5          # compact FIFO depth (matches firmware)
-MAX_PLAYS = 3                 # max_plays in firmware (live-adjustable via /setMaxPlays)
-MIN_MAX_PLAYS = 1             # lower bound for the live-adjustable play count
+MAX_PLAYS = 3                 # global repeat ceiling: no string plays more than this,
+                              # regardless of its per-string limit (effective = min of the
+                              # two). Also the default for sends that omit a count. Live-
+                              # adjustable via /setMaxPlays as a master throttle.
+MIN_MAX_PLAYS = 1             # lower bound for the play count
 MAX_MAX_PLAYS = 99           # upper bound (sanity cap)
 HEARTBEAT_TIMEOUT = 80        # seconds (HEARTBEAT_TIMEOUT)
 CLEANUP_INTERVAL = 30         # seconds (CLEANUP_INTERVAL)
@@ -509,16 +512,15 @@ def reset_play_count():
 
 @app.route("/getMaxPlays")
 def get_max_plays():
-    # Default repeat count applied to new strings that don't carry their own (the
-    # "next string" value seeded into the UI; each string captures it at send time).
+    # Global repeat ceiling (master throttle) + default for sends omitting a count.
     return jsonify({"max_plays": MAX_PLAYS})
 
 
 @app.route("/setMaxPlays")
 def set_max_plays():
-    # Set the default repeat count for newly sent strings. Existing strings keep the
-    # per-string limit they were captured with; this only affects future sends that
-    # don't pass an explicit ?plays= value.
+    # Adjust the global ceiling. Takes effect immediately on the next sequencer pass:
+    # lowering it throttles every string down to the new cap; raising it lets strings
+    # whose per-string limit is higher resume playing. Per-string limits are unchanged.
     global MAX_PLAYS
     raw = request.args.get("value", "")
     if not raw.lstrip("-").isdigit():
@@ -593,7 +595,9 @@ def sequencer():
                 start = cur_index
                 found = False
                 for _ in range(n):
-                    if play_counts[cur_index] < play_limits[cur_index]:
+                    # Effective cap = per-string limit, but never above the global
+                    # ceiling MAX_PLAYS (a live master throttle over the whole wall).
+                    if play_counts[cur_index] < min(play_limits[cur_index], MAX_PLAYS):
                         found = True
                         break
                     cur_index = (cur_index + 1) % n
