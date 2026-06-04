@@ -32,9 +32,11 @@ extern int sentCount;
 #define PREMADE_COUNT 8
 extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
 
-// Compact FIFO queue state plus per-entry play counts
+// Compact FIFO queue state plus per-entry play counts and per-string limits
 extern int playCount[MAX_SENT_STRINGS];
-extern int max_plays;
+extern int playLimit[MAX_SENT_STRINGS]; // per-string repeat cap (set at send time)
+extern int max_plays;                   // global ceiling: no string plays more than this
+extern int default_plays;               // preset inserted when sends omit a per-string count
 extern bool isDisplaying;
 
 extern Adafruit_NeoMatrix Matrix;

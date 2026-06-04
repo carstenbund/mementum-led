@@ -24,7 +24,8 @@ volatile bool Flow_Flag = false; // Flow flag for display logic
 String sentStrings[MAX_SENT_STRINGS];
 int sentCount = 0;
 
-int max_plays = 3;
+int max_plays    = 3; // global ceiling: no string ever plays more than this
+int default_plays = 3; // preset for new strings when no per-string count is supplied
 
 char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Hello World",
@@ -34,8 +35,9 @@ char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Action: Start"
 };
 
-// Per-entry play counts, parallel to the compact sentStrings queue
-int playCount[MAX_SENT_STRINGS] = {0}; // Tracks how many times each string has been displayed
+// Per-entry play counts and per-string repeat caps, parallel to sentStrings
+int playCount[MAX_SENT_STRINGS] = {0};
+int playLimit[MAX_SENT_STRINGS] = {0}; // set at send time; effective = min(playLimit, max_plays)
 
 // Function to load configuration from SPIFFS (config.csv)
 void loadConfigFromCSV() {
@@ -194,7 +196,7 @@ void serverSequencerLoop() {
     int startIndex = currentStringIndex;
     bool found = false;
     do {
-        if (playCount[currentStringIndex] < max_plays) {
+        if (playCount[currentStringIndex] < min(playLimit[currentStringIndex], max_plays)) {
             found = true;
             break;
         }

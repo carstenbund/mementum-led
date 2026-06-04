@@ -361,9 +361,11 @@ void handleDeleteSelected() {
                 for (int j = idx; j < sentCount - 1; j++) {
                     sentStrings[j] = sentStrings[j + 1];
                     playCount[j] = playCount[j + 1];
+                    playLimit[j] = playLimit[j + 1];
                 }
-                sentStrings[sentCount - 1] = ""; // Clear the freed last entry
+                sentStrings[sentCount - 1] = "";
                 playCount[sentCount - 1] = 0;
+                playLimit[sentCount - 1] = 0;
                 sentCount--;
             }
         }
@@ -426,27 +428,31 @@ void handleResetPlayCount() {
 // Append a string to the compact FIFO queue. When full, drop the oldest entry.
 // Crucially, the new slot's play count is reset to 0 so the message is actually shown
 // (a reused slot would otherwise keep the previous occupant's expired play count).
-void addSentString(const String &s) {
+void addSentString(const String &s, int limit = -1) {
+    int effectiveLimit = (limit > 0) ? limit : default_plays;
     if (sentCount < MAX_SENT_STRINGS) {
         sentStrings[sentCount] = s;
         playCount[sentCount] = 0;
+        playLimit[sentCount] = effectiveLimit;
         sentCount++;
     } else {
         // Full: shift everything left by one (drop oldest) and append at the end.
         for (int i = 0; i < MAX_SENT_STRINGS - 1; i++) {
             sentStrings[i] = sentStrings[i + 1];
             playCount[i] = playCount[i + 1];
+            playLimit[i] = playLimit[i + 1];
         }
         sentStrings[MAX_SENT_STRINGS - 1] = s;
         playCount[MAX_SENT_STRINGS - 1] = 0;
+        playLimit[MAX_SENT_STRINGS - 1] = effectiveLimit;
     }
 }
 
 void clearSentStrings() {
-    // Reset all strings in the array
     for (int i = 0; i < MAX_SENT_STRINGS; i++) {
-        sentStrings[i] = ""; // Clear the string
-        playCount[i] = 0; // Reset play counts
+        sentStrings[i] = "";
+        playCount[i] = 0;
+        playLimit[i] = 0;
     }
     sentCount = 0;
 
@@ -514,13 +520,13 @@ void handlePlay() {
 }
 
 void handleGetData() {
-  // Entries are stored compactly at [0, sentCount); this is also the display order.
+  // Return rich objects matching the Pi server format so the UI can show play badges.
   String json = "[";
   for (int i = 0; i < sentCount; i++) {
-    json += "\"" + sentStrings[i] + "\"";
-    if (i < sentCount - 1) {
-      json += ",";
-    }
+    if (i > 0) json += ",";
+    json += "{\"text\":\"" + sentStrings[i] + "\""
+            ",\"plays\":" + String(playCount[i]) +
+            ",\"limit\":" + String(playLimit[i]) + "}";
   }
   json += "]";
   server.send(200, "application/json", json);
@@ -532,7 +538,12 @@ void handleSwitch(uint8_t ledNumber) {
       if (server.hasArg("data")) {
         String newData = server.arg("data");
         newData.toCharArray(Text, sizeof(Text));
-        addSentString(newData); // Appends and resets that slot's play count
+        int limit = -1;
+        if (server.hasArg("plays")) {
+            int v = server.arg("plays").toInt();
+            if (v >= 1 && v <= 99) limit = v;
+        }
+        addSentString(newData, limit);
       }
       Flow_Flag = true;
       isDisplaying = false;
@@ -603,6 +614,43 @@ void WiFiEvent(WiFiEvent_t event) {
     }
 }
 
+void handleGetConfig() {
+    String json = "{\"max_plays\":" + String(max_plays) +
+                  ",\"default_plays\":" + String(default_plays) + "}";
+    server.send(200, "application/json", json);
+}
+
+void handleSetMaxPlays() {
+    if (!server.hasArg("value")) { server.send(400, "text/plain", "Missing value."); return; }
+    int v = server.arg("value").toInt();
+    if (v < 1 || v > 99) { server.send(400, "text/plain", "Value out of range (1..99)."); return; }
+    max_plays = v;
+    server.send(200, "application/json", "{\"max_plays\":" + String(max_plays) + "}");
+}
+
+void handleSetDefaultPlays() {
+    if (!server.hasArg("value")) { server.send(400, "text/plain", "Missing value."); return; }
+    int v = server.arg("value").toInt();
+    if (v < 1 || v > 99) { server.send(400, "text/plain", "Value out of range (1..99)."); return; }
+    default_plays = v;
+    server.send(200, "application/json", "{\"default_plays\":" + String(default_plays) + "}");
+}
+
+void handleClients() {
+    unsigned long now = millis();
+    String json = "{\"heartbeat_timeout\":" + String(HEARTBEAT_TIMEOUT / 1000) + ",\"clients\":[";
+    for (size_t i = 0; i < registeredClients.size(); i++) {
+        const auto &c = registeredClients[i];
+        if (i > 0) json += ",";
+        json += "{\"id\":" + String(c.id) +
+                ",\"ip\":\"" + c.ip.toString() + "\"" +
+                ",\"active\":true" +
+                ",\"age\":" + String((now - c.timestamp) / 1000.0f, 1) + "}";
+    }
+    json += "]}";
+    server.send(200, "application/json", json);
+}
+
 void webServerTask(void *params) {
     while (true) {
         server.handleClient(); // Process HTTP requests
@@ -655,8 +703,12 @@ void WIFI_Init()
   server.on("/clear", handleClearStrings);
   server.on("/deleteSelected", handleDeleteSelected);
   server.on("/resetPlayCount", handleResetPlayCount);
-  server.on("/time", handleTime);   // shared-clock reference (server) / sync source (client)
-  server.on("/play", handlePlay);   // timed display command received by clients
+  server.on("/time", handleTime);
+  server.on("/play", handlePlay);
+  server.on("/getConfig",        handleGetConfig);
+  server.on("/setMaxPlays",      handleSetMaxPlays);
+  server.on("/setDefaultPlays",  handleSetDefaultPlays);
+  server.on("/clients",          handleClients);
 
 
   // Endpoint to retrieve pre-made strings
