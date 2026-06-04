@@ -5,7 +5,7 @@
 #include <SPIFFS.h>
 
 char Project[20] = "mementumLED";
-char Version[20] = "1.3";
+char Version[20] = "1.4.4";
 
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
@@ -24,7 +24,8 @@ volatile bool Flow_Flag = false; // Flow flag for display logic
 String sentStrings[MAX_SENT_STRINGS];
 int sentCount = 0;
 
-int max_plays = 3;
+int max_plays     = 3; // global ceiling — no string ever plays more than this
+int default_plays = 3; // preset used when no per-string count is specified
 
 char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
     "Hello World",
@@ -66,7 +67,8 @@ void loadConfigFromCSV() {
             } else if (key == "APPSK") {
                 value.toCharArray(apPSK, sizeof(apPSK));
             } else if (key == "isAPMode") {
-                isAPMode = (value == "true");
+                // Ignored: the AP/client role is now elected at runtime from the MAC.
+                // See docs/failover-design.md. Kept here so old config.csv files still parse.
             } else if (key == "matrix_rotation") {
                 matrix_rotation = value.toInt();
             } else if (key == "max_plays") {
@@ -156,8 +158,13 @@ void setup() {
     clearSentStrings();
     // Build the banner from Version so the displayed/flashed version can never drift
     // from the protocol again (old 1.2 spoke a different /play protocol than the server).
-    String banner = String("  ") + Project + (isAPMode ? " server " : " client ") + Version;
-    displayText(banner.c_str());
+    // Role is no longer known at boot (it is elected at runtime), so the banner is neutral.
+    // Render it synchronously (not as a background task): the election spinner also drives
+    // the LED matrix from loop(), and two tasks hitting the NeoPixel driver at once crashes.
+    String banner = String("  ") + Project + " " + Version;
+    char bannerBuf[64];
+    banner.toCharArray(bannerBuf, sizeof(bannerBuf));
+    xdisplayText(bannerBuf);
 }
 
 // Main loop
@@ -171,7 +178,16 @@ const unsigned long expiredMessageInterval = 5000; // Minimum interval for showi
 // Server (AP) is the master sequencer: it owns the queue, picks the next valid message,
 // schedules a start time, broadcasts a timed /play to all clients, and renders the very
 // same schedule locally so it stays in lockstep with them.
+extern uint32_t serverReadyAt; // set in enterServer(); grace period before first broadcast
+
 void serverSequencerLoop() {
+    // Hold off broadcasting until clients have had time to reconnect after promotion.
+    if (millis() < serverReadyAt) {
+        yield();
+        delay(20);
+        return;
+    }
+
     // A message is currently scheduled/playing: render it until it finishes.
     if (currentSchedule.active) {
         renderScheduled(); // sets active=false when the scroll completes
@@ -238,10 +254,39 @@ void clientPlayerLoop() {
     delay(5);
 }
 
+// While electing (no server yet, or contesting after a loss) the node is neither rendering
+// a queue nor a /play schedule, so show a small rotating glyph to signal "configuring /
+// waiting for network" instead of going dark.
+void electionSpinnerLoop() {
+    static const char frames[] = {'|', '/', '-', '\\'};
+    static int frame = 0;
+    static unsigned long lastStep = 0;
+    if (millis() - lastStep < 200) { yield(); delay(5); return; }
+    lastStep = millis();
+    Matrix.fillScreen(0);
+    Matrix.setTextColor(Matrix.Color(128, 128, 0)); // dim "busy" tone
+    Matrix.setCursor(2, 0);
+    Matrix.print(frames[frame]);
+    Matrix.show();
+    frame = (frame + 1) & 3;
+}
+
 void Display_Loop() {
-    if (isAPMode) {
-        serverSequencerLoop();
-    } else {
-        clientPlayerLoop();
+    static NodeRole lastRole = ROLE_JOINING;
+
+    // On role transition from election -> settled role: clear the spinner and announce.
+    if (nodeRole != lastRole) {
+        if (nodeRole == ROLE_SERVER) {
+            xdisplayText((char*)"SERVER");
+        } else if (nodeRole == ROLE_CLIENT) {
+            xdisplayText((char*)"CLIENT");
+        }
+        lastRole = nodeRole;
+    }
+
+    switch (nodeRole) {
+        case ROLE_SERVER: serverSequencerLoop(); break; // master sequencer
+        case ROLE_CLIENT: clientPlayerLoop();    break; // stateless player
+        default:          electionSpinnerLoop(); break; // JOINING / CANDIDATE
     }
 }
