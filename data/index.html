@@ -480,7 +480,7 @@
         function clearLog() { document.getElementById('logWindow').innerHTML = ''; }
 
         window.onload = function() {
-            fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000));
+            fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000)).catch(function(){});
             fetchSentStrings();
             fetchPreMadeStrings();
             fetchFragments();
@@ -491,7 +491,7 @@
         };
     </script>
     <div class="header">
-        <h1>UNANGEBRACHT</h1>
+        <h1>mementum LED</h1>
     </div>
     <div class="container">
         <div class="input-container">
