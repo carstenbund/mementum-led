@@ -301,7 +301,8 @@ void sendHeartbeat() {
         printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
         dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
         clientId = -1;        // Force re-registration to get a fresh ID
-        isConnected = false;
+        // Do NOT clear isConnected here — WiFi is still up, only the HTTP server
+        // went away. The server-reachability retry in WIFI_Loop() handles recovery.
     }
     http.end();
 }
@@ -750,6 +751,28 @@ static void tickClient() {
         return;
     }
     roleSince = millis(); // still connected: keep pushing out the blip window
+
+    // WiFi is up but we have no server registration (server restarted and cleared its
+    // registry, or a heartbeat was rejected): re-register promptly, with its own backoff,
+    // without disturbing the WiFi link. Avoids waiting out the slow CANDIDATE path for the
+    // common "server rebooted fast, AP came back" case.
+    if (clientId == -1) {
+        static unsigned long lastReg = 0;
+        static unsigned long regDelay = 1000;
+        if (millis() - lastReg >= regDelay) {
+            lastReg = millis();
+            isConnected = true;           // WiFi is up; let register/sync proceed
+            registerWithServer();
+            if (clientId != -1) {
+                regDelay = 1000;          // reset backoff on success
+                heartbeatFailures = 0;
+                syncClock();
+            } else {
+                regDelay = min(regDelay * 2, maxRetryDelay);
+            }
+        }
+        return;
+    }
 
     if (millis() - lastHeartbeat >= heartbeatInterval) {
         lastHeartbeat = millis();
