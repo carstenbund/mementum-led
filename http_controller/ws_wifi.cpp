@@ -8,13 +8,13 @@ IPAddress apIP(10, 10, 10, 1);    // Set the IP address of the AP
 char ipStr[16];
 WebServer server(80);                               
 
-bool isAPMode = true; // Set to false for client mode
+bool isAPMode = false; // true only while this node is the elected SoftAP server
 bool isConnected = false;
 String serverAddress = "http://10.10.10.1"; // Server address for registration and heartbeat
 unsigned long lastHeartbeat = 0; // Tracks the last time the heartbeat was sent
 const unsigned long heartbeatInterval = 30000; // Heartbeat interval in milliseconds (30 seconds)
 
-const unsigned long HEARTBEAT_TIMEOUT = 80000; // 2 minutes in milliseconds
+const unsigned long HEARTBEAT_TIMEOUT = 90000; // 3× heartbeat interval — cleans up after 3 missed beats
 unsigned long lastCleanup = 0;                 // Last cleanup time
 const unsigned long CLEANUP_INTERVAL = 30000;  // Cleanup interval (30 seconds)
 
@@ -33,10 +33,28 @@ uint32_t serverNow() {
 
 uint32_t globalSeq = 0; // monotonic schedule sequence number (server side)
 
+// Wall-clock anchor: set once when the browser pushes its Date.now() via /setBrowserTime.
+// Allows millis()-based timestamps to be expressed as real Unix epoch seconds.
+static uint32_t epochBase   = 0; // real Unix seconds at anchor point
+static uint32_t millisBase  = 0; // millis() at anchor point
+
+// Convert any millis() value to a Unix epoch second.
+// Returns 0 if the browser hasn't set the anchor yet.
+// Uses signed delta so events that occurred before the browser connected
+// (firstSeen < millisBase) are still calculated correctly instead of wrapping.
+static uint32_t toEpoch(uint32_t ms) {
+    if (epochBase == 0) return 0;
+    int32_t deltaSec = (int32_t)(ms - millisBase) / 1000;
+    int32_t result   = (int32_t)epochBase + deltaSec;
+    return result > 0 ? (uint32_t)result : 0;
+}
+
 struct registeredClient {
     IPAddress ip;
     int id;
-    uint32_t timestamp; // Last known activity time
+    uint32_t firstSeen;  // millis() at registration
+    uint32_t lastSeen;   // millis() at last heartbeat
+    String   version;    // firmware version reported on /register?version=
 };
 
 std::vector<registeredClient> registeredClients;
@@ -237,6 +255,7 @@ void handleRoot() {
 void handleRegister() {
     IPAddress clientIP = server.client().remoteIP();
     uint32_t currentTime = millis();
+    String ver = server.hasArg("version") ? server.arg("version") : "";
 
     // Check if the client is already registered
     auto it = std::find_if(registeredClients.begin(), registeredClients.end(),
@@ -246,12 +265,12 @@ void handleRegister() {
         // Assign a new monotonic ID. Using the vector size would reuse IDs after a
         // cleanup erases an entry, causing ID collisions and heartbeat mismatches.
         int newId = nextClientId++;
-        registeredClients.push_back({clientIP, newId, currentTime});
-        printf("New client registered: ID=%d, IP=%s\r\n", newId, clientIP.toString().c_str());
+        registeredClients.push_back({clientIP, newId, currentTime, currentTime, ver});
+        printf("New client registered: ID=%d, IP=%s, ver=%s\r\n", newId, clientIP.toString().c_str(), ver.c_str());
         server.send(200, "text/plain", "Registered successfully. Your ID: " + String(newId));
     } else {
-        // Update timestamp for existing client
-        it->timestamp = currentTime;
+        // Update lastSeen for existing client
+        it->lastSeen = currentTime;
         printf("Updated client: ID=%d, IP=%s\r\n", it->id, clientIP.toString().c_str());
         server.send(200, "text/plain", "Already registered. Your ID: " + String(it->id));
     }
@@ -266,7 +285,7 @@ void handleHeartbeat() {
         [&](const registeredClient &client) { return client.ip == clientIP; });
 
     if (it != registeredClients.end()) {
-        it->timestamp = millis();
+        it->lastSeen = millis();
         printf("Heartbeat from client ID=%d, IP=%s\n", it->id, clientIP.toString().c_str());
         server.send(200, "text/plain", "Heartbeat acknowledged.");
     } else {
@@ -275,8 +294,6 @@ void handleHeartbeat() {
         server.send(400, "text/plain", "Unknown client. Please re-register.");
     }
 }
-
-unsigned long dynamicHeartbeatInterval = heartbeatInterval;
 
 void sendHeartbeat() {
     if (serverAddress.isEmpty() || clientId == -1 || !isConnected) {
@@ -296,10 +313,8 @@ void sendHeartbeat() {
     // must drop the connection flag and re-register on the next loop.
     if (httpCode >= 200 && httpCode < 300) {
         printf("Heartbeat acknowledged: %s\n", http.getString().c_str());
-        dynamicHeartbeatInterval = heartbeatInterval; // Reset interval on success
     } else {
         printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-        dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
         clientId = -1;        // Force re-registration to get a fresh ID
         // Do NOT clear isConnected here — WiFi is still up, only the HTTP server
         // went away. The server-reachability retry in WIFI_Loop() handles recovery.
@@ -315,7 +330,7 @@ void cleanupStaleClients() {
 
     // Iterate through the registered clients and remove stale ones
     for (auto it = registeredClients.begin(); it != registeredClients.end();) {
-        if (currentMillis - it->timestamp > HEARTBEAT_TIMEOUT) {
+        if (currentMillis - it->lastSeen > HEARTBEAT_TIMEOUT) {
             printf("Removing stale client: ID=%d, IP=%s\n", it->id, it->ip.toString().c_str());
             it = registeredClients.erase(it); // Remove the stale client
         } else {
@@ -565,31 +580,329 @@ void handleSwitch(uint8_t ledNumber) {
 //void handleSendData()  { handleSwitch(1); }
 void handleRGBOn()     { handleSwitch(2); }
 void handleRGBOff()    { handleSwitch(3); }
+
+// /setBrowserTime?epoch=N — anchor the ESP32's millis() to real wall time.
+// Only updates the anchor if not yet set, or if the browser time diverges by
+// more than 60 seconds from the current estimate (drift / server reboot).
+void handleSetBrowserTime() {
+    if (server.hasArg("epoch")) {
+        uint32_t incoming = (uint32_t)server.arg("epoch").toInt();
+        uint32_t estimated = (epochBase == 0) ? 0 : toEpoch(millis());
+        int32_t  drift = (int32_t)(incoming - estimated);
+        if (epochBase == 0 || drift < -60 || drift > 60) {
+            epochBase  = incoming;
+            millisBase = millis();
+            printf("Browser time anchored: epoch=%lu (drift=%lds)\n",
+                   (unsigned long)epochBase, (long)drift);
+        } else {
+            printf("Browser time OK (drift=%lds, no update)\n", (long)drift);
+        }
+    }
+    server.send(200, "text/plain", "ok");
+}
+
+// /clients — return registered client list so the UI status table populates.
+void handleClients() {
+    uint32_t now = millis();
+    String json = "{\"clients\":[";
+    for (size_t i = 0; i < registeredClients.size(); i++) {
+        const auto &c = registeredClients[i];
+        uint32_t age = now - c.lastSeen;
+        bool active = age < HEARTBEAT_TIMEOUT;
+        if (i > 0) json += ",";
+        json += "{\"id\":" + String(c.id) +
+                ",\"ip\":\"" + c.ip.toString() + "\"" +
+                ",\"version\":\"" + c.version + "\"" +
+                ",\"active\":" + (active ? "true" : "false") +
+                ",\"age\":" + String(age / 1000) +
+                ",\"first_seen\":" + String(toEpoch(c.firstSeen)) +
+                ",\"last_seen\":"  + String(toEpoch(c.lastSeen))  + "}";
+    }
+    json += "]}";
+    server.send(200, "application/json", json);
+}
+
+// /getConfig — return the play ceiling and default preset so the UI config section loads.
+void handleGetConfig() {
+    String json = "{\"max_plays\":" + String(max_plays) +
+                  ",\"default_plays\":" + String(default_plays) + "}";
+    server.send(200, "application/json", json);
+}
+
+// /setMaxPlays?value=N — update the global ceiling at runtime.
+void handleSetMaxPlays() {
+    if (server.hasArg("value")) {
+        int v = server.arg("value").toInt();
+        if (v >= 1 && v <= 99) max_plays = v;
+    }
+    String json = "{\"max_plays\":" + String(max_plays) + "}";
+    server.send(200, "application/json", json);
+}
+
+// /setDefaultPlays?value=N — update the per-string preset at runtime.
+void handleSetDefaultPlays() {
+    if (server.hasArg("value")) {
+        int v = server.arg("value").toInt();
+        if (v >= 1 && v <= 99) default_plays = v;
+    }
+    String json = "{\"default_plays\":" + String(default_plays) + "}";
+    server.send(200, "application/json", json);
+}
 unsigned long retryDelay = 1000; // Start with 1 second
 const unsigned long maxRetryDelay = 32000; // Cap at 32 seconds
 
 
-bool connectToServer() {
+// ---------------------------------------------------------------------------
+// Role-agnostic failover state machine (see docs/failover-design.md).
+//
+// Every node runs this same machine and elects a single SoftAP "server" at
+// runtime from what it can observe (is APSSID on the air?). On server loss the
+// best-ranked survivor promotes itself; the others rejoin it; a returning node
+// rejoins as a plain client. A MAC-derived backoff orders promotions and a
+// lowest-BSSID abdication rule cleans up the rare simultaneous promotion. The
+// 1.3 HTTP protocol is unchanged.
+// ---------------------------------------------------------------------------
+
+NodeRole nodeRole = ROLE_JOINING;
+
+// Tunables (compile-time; see the parameter table in the design doc).
+static const uint32_t JOIN_GRACE_COLD      = 3000;  // wait before scanning, first boot
+static const uint32_t JOIN_GRACE_WARM      = 6000;  // wait before scanning, after we've seen a server
+static const uint32_t T_GRACE_COLD         = 3000;  // absence before promoting, first boot
+static const uint32_t T_GRACE_FAIL         = 8000;  // absence before promoting, after losing a server
+static const uint32_t SPREAD_MS            = 5000;  // MAC-hashed backoff window (speed over safety)
+static const uint32_t JITTER_MS            = 500;   // extra random spread on top of the slot
+static const uint32_t SCAN_INTERVAL        = 2000;  // CANDIDATE scan cadence
+static const uint32_t SERVER_SCAN_INTERVAL = 6000;  // SERVER abdication-check cadence
+static const uint32_t ABDICATION_WINDOW    = 60000; // only hunt competitors this long after promoting
+static const int      HEARTBEAT_FAIL_N     = 3;     // consecutive heartbeat failures => server lost
+static const uint32_t PROMOTION_COOLDOWN   = 15000; // anti-flap after a promote/abdicate
+static const uint32_t PROMOTION_GRACE_MS   = 5000;  // wait after promoting before broadcasting
+
+static uint32_t roleSince         = 0;
+uint32_t serverReadyAt             = 0;  // millis() when the post-promotion grace period ends     // millis() when we entered the current role
+static uint32_t absenceSince      = 0;     // CANDIDATE: when APSSID was first confirmed absent
+static uint32_t promoteAt         = 0;     // CANDIDATE: deadline to promote if still absent
+static uint32_t lastScan          = 0;     // CANDIDATE scan timestamp
+static uint32_t lastServerScan    = 0;     // SERVER abdication-scan timestamp
+static uint32_t lastPromotionEvt  = 0;     // last promote/abdicate, for the cooldown
+static uint32_t backoffSlot       = 0;     // mac_hash % SPREAD_MS, stable per chip
+static bool     everSawServer     = false; // distinguishes cold boot from failover
+static int      heartbeatFailures = 0;
+
+// FNV-1a over the STA MAC -> a stable pseudo-random number. The promotion backoff is
+// derived from this so each chip waits a different, repeatable amount before promoting.
+static uint32_t macHash() {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 6; i++) { h ^= mac[i]; h *= 16777619u; }
+    return h;
+}
+
+// Scan for our network. Returns true if APSSID is on the air. When outLowerBssid is
+// provided, sets it true if a competing AP with the same SSID has a numerically lower
+// BSSID than our own SoftAP MAC (the server uses this to decide whether to abdicate).
+static bool scanForServerNetwork(bool *outLowerBssid) {
+    if (outLowerBssid) *outLowerBssid = false;
+    // Our AP is pinned to channel 1, so scan only channel 1 with a short dwell. A full
+    // all-channel scan blocks loop() for seconds and can trip the task watchdog (reboot).
+    int n = WiFi.scanNetworks(false /*async*/, false /*hidden*/, false /*passive*/,
+                              300 /*ms per channel*/, 1 /*channel*/);
+    bool present = false;
+    uint8_t myAp[6];
+    WiFi.softAPmacAddress(myAp);
+    for (int i = 0; i < n; i++) {
+        if (WiFi.SSID(i) == String(apSSID)) {
+            present = true;
+            if (outLowerBssid) {
+                uint8_t *bssid = WiFi.BSSID(i);
+                // memcmp over the 6 big-endian bytes == numeric MAC comparison.
+                if (bssid && memcmp(bssid, myAp, 6) < 0) *outLowerBssid = true;
+            }
+        }
+    }
+    WiFi.scanDelete();
+    return present;
+}
+
+static void enterJoining() {
+    nodeRole    = ROLE_JOINING;
+    isAPMode    = false;
+    roleSince   = millis();
+    isConnected = false;
+    clientId    = -1;
     WiFi.mode(WIFI_STA);
     WiFi.begin(apSSID, apPSK);
+    printf("[role] -> JOINING (connecting to %s)\n", apSSID);
+}
 
-    printf("Connecting to WiFi...\n");
-    unsigned long startAttemptTime = millis();
+static void enterClient() {
+    nodeRole      = ROLE_CLIENT;
+    isAPMode      = false;
+    roleSince     = millis();
+    everSawServer = true;
+    heartbeatFailures = 0;
+    isConnected   = true;
+    lastHeartbeat = millis();
+    // Registration + clock sync are driven by the IP_EVENT_STA_GOT_IP handler (WiFiEvent),
+    // which has already run by the time the STA reports WL_CONNECTED.
+    printf("[role] -> CLIENT (IP %s)\n", WiFi.localIP().toString().c_str());
+}
 
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < retryDelay) {
-        delay(1000);
-        printf(".");
+static void enterCandidate() {
+    nodeRole     = ROLE_CANDIDATE;
+    isAPMode     = false;
+    roleSince    = millis();
+    absenceSince = 0;     // set on the first confirmed-absent scan
+    lastScan     = 0;     // scan promptly
+    isConnected  = false;
+    clientId     = -1;
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false, true); // drop any pending association so scans are clean
+    printf("[role] -> CANDIDATE (server lost; scanning)\n");
+}
+
+static void enterServer() {
+    nodeRole         = ROLE_SERVER;
+    isAPMode         = true;
+    roleSince        = millis();
+    lastServerScan   = millis();
+    lastPromotionEvt = millis();
+    everSawServer    = true;
+    // Bring up the SoftAP and serve. AP_STA keeps the STA available for the short-lived
+    // abdication scans during the post-promotion vulnerability window.
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    WiFi.softAP(apSSID, apPSK, 1, 0, 16);
+    // Fresh server: empty queue and own the clock domain (offset 0). Clients re-register
+    // and re-sync against us via the unchanged /register, /time, /heartbeat protocol.
+    registeredClients.clear();
+    clearSentStrings();
+    clockOffset = 0;
+    clockSynced = true;
+    serverReadyAt = millis() + PROMOTION_GRACE_MS;
+    delay(100);
+    printf("[role] -> SERVER (AP up at %s)\n", apIP.toString().c_str());
+}
+
+static void tickJoining() {
+    if (WiFi.status() == WL_CONNECTED) {
+        enterClient();
+        return;
+    }
+    uint32_t grace = everSawServer ? JOIN_GRACE_WARM : JOIN_GRACE_COLD;
+    if (millis() - roleSince < grace) return; // keep waiting for the association
+
+    // Not associating yet. Is the network even on the air?
+    if (scanForServerNetwork(nullptr)) {
+        // Present but slow to join: kick another attempt and keep waiting.
+        WiFi.begin(apSSID, apPSK);
+        roleSince = millis();
+    } else {
+        enterCandidate();
+    }
+}
+
+static void tickCandidate() {
+    if (millis() - lastScan < SCAN_INTERVAL) return;
+    lastScan = millis();
+
+    if (scanForServerNetwork(nullptr)) {
+        // Someone serves (a peer promoted, or the original returned): rejoin as a client.
+        enterJoining();
+        return;
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        printf("\nConnected to WiFi. IP Address: %s\n", WiFi.localIP().toString().c_str());
-        retryDelay = 1000; // Reset delay after successful WiFi connection
-        isConnected = true;
-        return true;
-    } else {
-        retryDelay = min(retryDelay * 2, maxRetryDelay); // Exponential backoff
-        printf("\nFailed to connect to WiFi. Retrying in %lu ms...\n", retryDelay);
-        return false;
+    uint32_t now = millis();
+    if (absenceSince == 0) {
+        absenceSince = now;
+        uint32_t graceWindow = everSawServer ? T_GRACE_FAIL : T_GRACE_COLD;
+        promoteAt = now + graceWindow + backoffSlot + (uint32_t)random(JITTER_MS);
+        if (now - lastPromotionEvt < PROMOTION_COOLDOWN) {
+            promoteAt += PROMOTION_COOLDOWN; // don't immediately re-promote after a flap
+        }
+        printf("[role] CANDIDATE: server absent; promote in ~%lu ms\n",
+               (unsigned long)(promoteAt - now));
+        return;
+    }
+
+    if (now >= promoteAt) {
+        // Final guard scan: re-check immediately before claiming the SSID, to catch a peer
+        // that promoted during our backoff.
+        if (scanForServerNetwork(nullptr)) {
+            enterJoining();
+        } else {
+            enterServer();
+        }
+    }
+}
+
+static void tickClient() {
+    if (WiFi.status() != WL_CONNECTED) {
+        // Link down. Allow a brief window for transient blips (STA auto-reconnect) before
+        // declaring the server lost and contesting.
+        if (millis() - roleSince > 4000) {
+            enterCandidate();
+        }
+        return;
+    }
+    roleSince = millis(); // still connected: keep pushing out the blip window
+
+    // WiFi is up but we have no server registration (server restarted and cleared its
+    // registry, or a heartbeat was rejected): re-register promptly, with its own backoff,
+    // without disturbing the WiFi link. Avoids waiting out the slow CANDIDATE path for the
+    // common "server rebooted fast, AP came back" case.
+    if (clientId == -1) {
+        static unsigned long lastReg = 0;
+        static unsigned long regDelay = 1000;
+        if (millis() - lastReg >= regDelay) {
+            lastReg = millis();
+            isConnected = true;           // WiFi is up; let register/sync proceed
+            registerWithServer();
+            if (clientId != -1) {
+                regDelay = 1000;          // reset backoff on success
+                heartbeatFailures = 0;
+                syncClock();
+            } else {
+                regDelay = min(regDelay * 2, maxRetryDelay);
+            }
+        }
+        return;
+    }
+
+    if (millis() - lastHeartbeat >= heartbeatInterval) {
+        lastHeartbeat = millis();
+        sendHeartbeat();              // clears isConnected on failure
+        if (isConnected) {
+            heartbeatFailures = 0;
+            syncClock();              // keep the shared clock from drifting
+        } else if (++heartbeatFailures >= HEARTBEAT_FAIL_N) {
+            enterCandidate();
+        }
+    }
+}
+
+static void tickServer() {
+    if (millis() - lastCleanup >= CLEANUP_INTERVAL) {
+        lastCleanup = millis();
+        cleanupStaleClients();
+    }
+    // Split-brain cleanup, only during the vulnerability window right after promotion when
+    // a simultaneous promoter could exist. After that a lone server stops scanning, so its
+    // AP is never paused in steady state.
+    if (millis() - roleSince < ABDICATION_WINDOW &&
+        millis() - lastServerScan >= SERVER_SCAN_INTERVAL) {
+        lastServerScan = millis();
+        bool lower = false;
+        scanForServerNetwork(&lower);
+        if (lower) {
+            // A server with a lower BSSID also exists; deterministically yield to it.
+            printf("[role] lower-BSSID server present; abdicating\n");
+            WiFi.softAPdisconnect(true);
+            lastPromotionEvt = millis(); // start the cooldown so we don't re-promote at once
+            enterJoining();
+        }
     }
 }
 
@@ -710,10 +1023,6 @@ void webServerTask(void *params) {
 
 void WIFI_Init()
 {
-    // The name and password of the WiFi access point
-    String ssid = apSSID;            
-    String password = apPSK;            
-
     // Initialize SPIFFS
     if (!SPIFFS.begin(true)) { // Use true for automatic format if SPIFFS is unformatted
         printf("Failed to mount SPIFFS\n");
@@ -721,28 +1030,20 @@ void WIFI_Init()
     }
     printf("SPIFFS mounted successfully\n");
 
-  if (isAPMode) {
-        // AP Mode
-        WiFi.mode(WIFI_AP);
-        String ssid = apSSID;
-        String password = apPSK;
+  // Role (AP server vs STA client) is decided at runtime by the failover state machine
+  // (see WIFI_Loop and docs/failover-design.md); it is no longer hard-wired from config.
+  // Derive this node's stable promotion backoff from its MAC.
+  backoffSlot = macHash() % SPREAD_MS;
+  WiFi.onEvent(WiFiEvent); // Attach the STA event handler (drives reconnect/registration)
 
-        if (!WiFi.softAP(ssid.c_str(), password.c_str())) {
-            printf("Soft AP creation failed.\n");
-            return;
-        }
+  // Bring the WiFi/LWIP stack up (as an STA, starting the election) BEFORE server.begin()
+  // and the web-server task. Starting the HTTP server while WiFi is still uninitialised
+  // crashes/boot-loops the device.
+  enterJoining();
 
-        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-        IPAddress myIP = WiFi.softAP(ssid, password, 1, 0, 16);
-        delay(100);
-        printf("AP Mode - IP Address: %s\n", myIP.toString().c_str());
-    } else {
-      // Client Mode
-      WiFi.onEvent(WiFiEvent); // Attach the event handler
-      connectToServer();
-  }
-
-  server.on("/"           ,handleRoot);        
+  // The HTTP routes run on every node: a server answers /register,/time,/heartbeat,... and
+  // a client answers /play,/clear over the same WebServer. So they are always registered.
+  server.on("/"           ,handleRoot);
   server.on("/getData"    , handleGetData);
   server.on("/SendData"   , handleSendData);
   server.on("/register"   , handleRegister);
@@ -752,16 +1053,17 @@ void WIFI_Init()
   server.on("/clear", handleClearStrings);
   server.on("/deleteSelected", handleDeleteSelected);
   server.on("/resetPlayCount", handleResetPlayCount);
-  server.on("/time", handleTime);
-  server.on("/play", handlePlay);
-  server.on("/fragments",        handleFragments);
+  server.on("/time",            handleTime);
+  server.on("/play",            handlePlay);
+  server.on("/clients",         handleClients);
+  server.on("/setBrowserTime",  handleSetBrowserTime);
+  server.on("/getConfig",       handleGetConfig);
+  server.on("/setMaxPlays",     handleSetMaxPlays);
+  server.on("/setDefaultPlays", handleSetDefaultPlays);
+  server.on("/fragments",       handleFragments);
   server.on("/addFragment",     handleAddFragment);
   server.on("/updateFragment",  handleUpdateFragment);
   server.on("/deleteFragment",  handleDeleteFragment);
-  server.on("/getConfig",        handleGetConfig);
-  server.on("/setMaxPlays",      handleSetMaxPlays);
-  server.on("/setDefaultPlays",  handleSetDefaultPlays);
-  server.on("/clients",          handleClients);
 
 
   // Endpoint to retrieve pre-made strings
@@ -787,57 +1089,15 @@ void WIFI_Init()
         1,                    // Priority
         NULL                  // Task handle
     );
-    
 }
 
+// Tick the failover state machine. Each branch is non-blocking apart from the periodic
+// WiFi scans (CANDIDATE / post-promotion SERVER), which the design accepts.
 void WIFI_Loop() {
-    //server.handleClient(); // Process incoming HTTP requests
-
-    unsigned long currentMillis = millis();
-
-    if (!isAPMode) {
-        if (!isConnected) {
-            // WiFi layer is down — retry the physical connection with backoff.
-            static unsigned long lastWiFiRetry = 0;
-            if (currentMillis - lastWiFiRetry >= retryDelay) {
-                lastWiFiRetry = currentMillis;
-                if (connectToServer()) {
-                    printf("WiFi reconnected.\n");
-                }
-            }
-        } else if (clientId == -1) {
-            // WiFi is up but we lost the server registration (server restarted,
-            // heartbeat rejected, etc.). Retry registration independently with
-            // its own backoff so WiFi state is not touched.
-            static unsigned long lastServerRetry = 0;
-            static unsigned long serverRetryDelay = 1000;
-            if (currentMillis - lastServerRetry >= serverRetryDelay) {
-                lastServerRetry = currentMillis;
-                registerWithServer();
-                if (clientId != -1) {
-                    serverRetryDelay = 1000; // reset on success
-                    syncClock();
-                    printf("Re-registered with server.\n");
-                } else {
-                    serverRetryDelay = min(serverRetryDelay * 2, maxRetryDelay);
-                    printf("Server still unreachable. Retrying in %lu ms...\n", serverRetryDelay);
-                }
-            }
-        }
-      
-        // Client Mode: Send heartbeat at intervals and refresh the clock offset
-        if (currentMillis - lastHeartbeat >= heartbeatInterval) {
-            lastHeartbeat = currentMillis;
-            sendHeartbeat();
-            if (isConnected) {
-                syncClock(); // keep the shared clock from drifting between reconnects
-            }
-        }
-    } else {
-        // AP Mode: Cleanup stale clients at intervals
-        if (currentMillis - lastCleanup >= CLEANUP_INTERVAL) {
-            lastCleanup = currentMillis;
-            cleanupStaleClients();
-        }
+    switch (nodeRole) {
+        case ROLE_JOINING:   tickJoining();   break;
+        case ROLE_CLIENT:    tickClient();    break;
+        case ROLE_CANDIDATE: tickCandidate(); break;
+        case ROLE_SERVER:    tickServer();    break;
     }
 }
