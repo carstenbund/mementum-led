@@ -614,6 +614,55 @@ void WiFiEvent(WiFiEvent_t event) {
     }
 }
 
+void saveFragmentsToCSV() {
+    File file = SPIFFS.open("/fragments.csv", "w");
+    if (!file) { printf("Failed to write /fragments.csv\n"); return; }
+    for (const auto &f : fragments) file.println(f);
+    file.close();
+}
+
+void handleFragments() {
+    String json = "[";
+    for (size_t i = 0; i < fragments.size(); i++) {
+        if (i > 0) json += ",";
+        json += "{\"id\":" + String(i) + ",\"text\":\"" + fragments[i] + "\"}";
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+}
+
+void handleAddFragment() {
+    String text = server.arg("text");
+    text.trim();
+    if (text.length() == 0) { server.send(400, "text/plain", "Empty fragment."); return; }
+    fragments.push_back(text.substring(0, MAX_TEXT_LENGTH));
+    saveFragmentsToCSV();
+    handleFragments();
+}
+
+void handleUpdateFragment() {
+    if (!server.hasArg("id") || !server.hasArg("text")) {
+        server.send(400, "text/plain", "Missing id or text."); return;
+    }
+    int id = server.arg("id").toInt();
+    String text = server.arg("text");
+    text.trim();
+    if (id < 0 || id >= (int)fragments.size()) { server.send(404, "text/plain", "No such fragment."); return; }
+    if (text.length() == 0) { server.send(400, "text/plain", "Empty fragment."); return; }
+    fragments[id] = text.substring(0, MAX_TEXT_LENGTH);
+    saveFragmentsToCSV();
+    handleFragments();
+}
+
+void handleDeleteFragment() {
+    if (!server.hasArg("id")) { server.send(400, "text/plain", "Missing id."); return; }
+    int id = server.arg("id").toInt();
+    if (id < 0 || id >= (int)fragments.size()) { server.send(404, "text/plain", "No such fragment."); return; }
+    fragments.erase(fragments.begin() + id);
+    saveFragmentsToCSV();
+    handleFragments();
+}
+
 void handleGetConfig() {
     String json = "{\"max_plays\":" + String(max_plays) +
                   ",\"default_plays\":" + String(default_plays) + "}";
@@ -705,6 +754,10 @@ void WIFI_Init()
   server.on("/resetPlayCount", handleResetPlayCount);
   server.on("/time", handleTime);
   server.on("/play", handlePlay);
+  server.on("/fragments",        handleFragments);
+  server.on("/addFragment",     handleAddFragment);
+  server.on("/updateFragment",  handleUpdateFragment);
+  server.on("/deleteFragment",  handleDeleteFragment);
   server.on("/getConfig",        handleGetConfig);
   server.on("/setMaxPlays",      handleSetMaxPlays);
   server.on("/setDefaultPlays",  handleSetDefaultPlays);
@@ -714,11 +767,9 @@ void WIFI_Init()
   // Endpoint to retrieve pre-made strings
   server.on("/getPreMade", HTTP_GET, [](){
       String json = "[";
-      for (int i = 0; i < PREMADE_COUNT; i++) {
-          json += "\"" + String(predefinedTexts[i]) + "\"";
-          if (i < PREMADE_COUNT - 1) {
-              json += ",";
-          }
+      for (size_t i = 0; i < fragments.size(); i++) {
+          if (i > 0) json += ",";
+          json += "\"" + fragments[i] + "\"";
       }
       json += "]";
       server.send(200, "application/json", json);

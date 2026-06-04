@@ -29,8 +29,10 @@ extern String sentStrings[MAX_SENT_STRINGS];
 extern int sentCount;
 
 #define MAX_TEXT_LENGTH 100
-#define PREMADE_COUNT 8
-extern char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH];
+
+#include <vector>
+extern std::vector<String> fragments; // editable preset library, persisted in /fragments.csv
+void saveFragmentsToCSV();
 
 // Compact FIFO queue state plus per-entry play counts and per-string limits
 extern int playCount[MAX_SENT_STRINGS];

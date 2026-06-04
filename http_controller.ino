@@ -27,13 +27,7 @@ int sentCount = 0;
 int max_plays    = 3; // global ceiling: no string ever plays more than this
 int default_plays = 3; // preset for new strings when no per-string count is supplied
 
-char predefinedTexts[PREMADE_COUNT][MAX_TEXT_LENGTH] = {
-    "Hello World",
-    "Temperature: 25C",
-    "Status: OK",
-    "Error: None",
-    "Action: Start"
-};
+std::vector<String> fragments; // editable preset library; loaded from /fragments.csv at boot
 
 // Per-entry play counts and per-string repeat caps, parallel to sentStrings
 int playCount[MAX_SENT_STRINGS] = {0};
@@ -75,25 +69,32 @@ void loadConfigFromCSV() {
                  max_plays = value.toInt();
             } else if (key == "initialText") {
                 value.toCharArray(Text, sizeof(Text));
-            } else {
-                for (size_t i = 0; i < PREMADE_COUNT; i++) {
-                    if (key == "predefText" + String(i + 1)) {
-                        value.toCharArray(predefinedTexts[i], MAX_TEXT_LENGTH);
-                        break;
-                    }
-                }
             }
         }
     }
 
     file.close();
-    printf("Configuration loaded from SPIFFS:");
-    printf("APSSID: %s\n", apSSID);
-    printf("APPSK: %s\n", apPSK);
-    printf("Text: %s\n", Text);
-    for (size_t i = 0; i < PREMADE_COUNT; i++) {
-        printf("predefinedTexts[%d]: %s\n", i, predefinedTexts[i]);
+    printf("Config loaded: APSSID=%s Text=%s\n", apSSID, Text);
+}
+
+void loadFragmentsFromCSV() {
+    // SPIFFS is already mounted by loadConfigFromCSV(); open the fragment store.
+    File file = SPIFFS.open("/fragments.csv", "r");
+    if (!file) {
+        // First boot: seed with defaults and persist them so future edits are saved.
+        fragments = {"Hello World", "Temperature: 25C", "Status: OK",
+                     "Error: None", "Action: Start"};
+        saveFragmentsToCSV();
+        printf("fragments.csv not found, seeded %d defaults\n", fragments.size());
+        return;
     }
+    while (file.available()) {
+        String line = file.readStringUntil('\n');
+        line.trim();
+        if (line.length() > 0) fragments.push_back(line);
+    }
+    file.close();
+    printf("Loaded %d fragments from SPIFFS\n", fragments.size());
 }
 
 void displayTextTask(void *parameters) {
@@ -146,8 +147,9 @@ void setup() {
     delay(1000);
     //Serial.begin(115200);
     
-    // Load configuration from SPIFFS
+    // Load configuration and fragment library from SPIFFS
     loadConfigFromCSV();
+    loadFragmentsFromCSV();
     delay(1000);
     
     // Initialize WiFi
