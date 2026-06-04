@@ -43,7 +43,15 @@ app = Flask(__name__)
 
 # ---- Configuration (mirrors ws_wifi.h / ws_flow.h) ----
 MAX_SENT_STRINGS = 5          # compact FIFO depth (matches firmware)
-MAX_PLAYS = 3                 # max_plays in firmware
+# These two are seed defaults; the persisted values in SQLite (loaded just after
+# db_init) override them on startup, and the /set* routes write changes back.
+MAX_PLAYS = 3                 # global repeat ceiling (hard cap): no string plays more
+                              # than this, regardless of its per-string limit
+                              # (effective = min of the two). Live master throttle.
+DEFAULT_PLAYS = 3            # preset repeat count inserted when a send doesn't specify
+                              # an individual one. Independent of the ceiling.
+MIN_MAX_PLAYS = 1             # lower bound for any play count
+MAX_MAX_PLAYS = 99           # upper bound (sanity cap)
 HEARTBEAT_TIMEOUT = 80        # seconds (HEARTBEAT_TIMEOUT)
 CLEANUP_INTERVAL = 30         # seconds (CLEANUP_INTERVAL)
 SCROLL_INTERVAL_MS = 120      # ms per pixel step (SCROLL_INTERVAL_MS)
@@ -90,6 +98,10 @@ def db_init():
         if conn.execute("SELECT COUNT(*) FROM fragments").fetchone()[0] == 0:
             conn.executemany("INSERT INTO fragments (text, position) VALUES (?, ?)",
                              [(t, i) for i, t in enumerate(PREMADE_STRINGS)])
+        # Persistent config key/value store (survives server restarts).
+        conn.execute("""CREATE TABLE IF NOT EXISTS config (
+                            key   TEXT PRIMARY KEY,
+                            value INTEGER NOT NULL)""")
 
 
 def db_fragments():
@@ -99,13 +111,32 @@ def db_fragments():
     return [{"id": r["id"], "text": r["text"]} for r in rows]
 
 
+def db_get_config(key, default):
+    with db_connect() as conn:
+        row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def db_set_config(key, value):
+    with db_lock, db_connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                     (key, value))
+
+
 db_init()
+
+# Load persisted config, falling back to the seed defaults defined above on first run.
+MAX_PLAYS = db_get_config("max_plays", MAX_PLAYS)
+DEFAULT_PLAYS = db_get_config("default_plays", DEFAULT_PLAYS)
 
 # ---- Shared state (guarded by state_lock) ----
 state_lock = threading.Lock()
 
 sent_strings = []             # compact FIFO of raw texts (may include @color prefix)
-play_counts = []              # parallel to sent_strings
+play_counts = []              # parallel to sent_strings: times each has been shown
+play_limits = []              # parallel to sent_strings: per-string repeat cap (captured
+                              # at send time so each message can repeat a different number
+                              # of times — enables orchestrating patterns)
 cur_index = 0                 # sequencer cursor
 
 # ip -> {'id', 'version', 'first_seen', 'last_seen', 'active'}. Clients are kept
@@ -196,15 +227,23 @@ def scroll_duration_ms(raw):
     return (MATRIX_WIDTH + text_width + 1) * SCROLL_INTERVAL_MS
 
 
-def add_sent_string(s):
+def clamp_plays(value):
+    """Clamp a repeat count into the allowed range."""
+    return max(MIN_MAX_PLAYS, min(MAX_MAX_PLAYS, value))
+
+
+def add_sent_string(s, limit=None):
     """Append to the compact FIFO, dropping the oldest when full and resetting the
-    new slot's play count so the message is actually shown (mirrors addSentString)."""
+    new slot's play count so the message is actually shown (mirrors addSentString).
+    `limit` is this message's own repeat count; defaults to the preset DEFAULT_PLAYS."""
     global cur_index
     sent_strings.append(s)
     play_counts.append(0)
+    play_limits.append(clamp_plays(DEFAULT_PLAYS if limit is None else limit))
     if len(sent_strings) > MAX_SENT_STRINGS:
         sent_strings.pop(0)
         play_counts.pop(0)
+        play_limits.pop(0)
         cur_index = max(0, cur_index - 1)  # keep the cursor on the same logical item
 
 
@@ -266,7 +305,10 @@ def serve_index():
 @app.route("/getData")
 def get_data():
     with state_lock:
-        return jsonify(list(sent_strings))  # compact order == display order
+        # compact order == display order; include each string's own repeat cap and
+        # how many times it has played so far so the UI can show/orchestrate them.
+        return jsonify([{"text": t, "plays": play_counts[i], "limit": play_limits[i]}
+                        for i, t in enumerate(sent_strings)])
 
 
 @app.route("/getPreMade")
@@ -331,8 +373,12 @@ def delete_fragment():
 def send_data():
     if 'data' not in request.args:
         return jsonify({"status": "error", "message": "No data provided."}), 400
+    # Optional per-string repeat count; falls back to the server default (MAX_PLAYS)
+    # for callers that don't supply one (firmware, curl, older clients).
+    raw_plays = request.args.get('plays', '')
+    limit = clamp_plays(int(raw_plays)) if raw_plays.lstrip('-').isdigit() else None
     with state_lock:
-        add_sent_string(request.args['data'])
+        add_sent_string(request.args['data'], limit)
     # Model A: do not push raw text; the sequencer distributes it via /play.
     return jsonify({"status": "ok", "message": "Command received and processed."})
 
@@ -343,6 +389,7 @@ def clear():
     with state_lock:
         sent_strings.clear()
         play_counts.clear()
+        play_limits.clear()
         cur_index = 0
         targets = snapshot_targets()
     # Tell clients to blank immediately and drop any in-flight schedule.
@@ -486,6 +533,55 @@ def reset_play_count():
     return "Play counts reset.", 200
 
 
+@app.route("/getConfig")
+def get_config():
+    # All live-adjustable config values (extend this dict as more are added).
+    return jsonify({"max_plays": MAX_PLAYS, "default_plays": DEFAULT_PLAYS})
+
+
+def _parse_plays_value():
+    """Validate the ?value= arg shared by the play-count config setters.
+    Returns (value, None) on success or (None, (msg, status)) on error."""
+    raw = request.args.get("value", "")
+    if not raw.lstrip("-").isdigit():
+        return None, ("Missing or non-numeric value parameter.", 400)
+    value = int(raw)
+    if value < MIN_MAX_PLAYS or value > MAX_MAX_PLAYS:
+        return None, ("Value out of range (%d..%d)." % (MIN_MAX_PLAYS, MAX_MAX_PLAYS), 400)
+    return value, None
+
+
+@app.route("/setMaxPlays")
+def set_max_plays():
+    # Hard ceiling: no string ever plays more than this (effective = min(per-string,
+    # ceiling)). Takes effect on the next sequencer pass -- lowering it throttles every
+    # string down to the new cap, raising it lets higher per-string limits resume.
+    global MAX_PLAYS
+    value, err = _parse_plays_value()
+    if err:
+        return err
+    with state_lock:
+        MAX_PLAYS = value
+    db_set_config("max_plays", value)
+    log.emit("CONFIG    max_plays (ceiling) -> %d" % value)
+    return jsonify({"max_plays": MAX_PLAYS})
+
+
+@app.route("/setDefaultPlays")
+def set_default_plays():
+    # Preset repeat count inserted into a new string when the send omits one. Does not
+    # touch existing strings or the ceiling.
+    global DEFAULT_PLAYS
+    value, err = _parse_plays_value()
+    if err:
+        return err
+    with state_lock:
+        DEFAULT_PLAYS = value
+    db_set_config("default_plays", value)
+    log.emit("CONFIG    default_plays -> %d" % value)
+    return jsonify({"default_plays": DEFAULT_PLAYS})
+
+
 @app.route("/deleteSelected")
 def delete_selected():
     global cur_index
@@ -498,6 +594,7 @@ def delete_selected():
             if 0 <= idx < len(sent_strings):
                 sent_strings.pop(idx)
                 play_counts.pop(idx)
+                play_limits.pop(idx)
         if cur_index >= len(sent_strings):
             cur_index = 0
     return get_data()
@@ -546,7 +643,9 @@ def sequencer():
                 start = cur_index
                 found = False
                 for _ in range(n):
-                    if play_counts[cur_index] < MAX_PLAYS:
+                    # Effective cap = per-string limit, but never above the global
+                    # ceiling MAX_PLAYS (a live master throttle over the whole wall).
+                    if play_counts[cur_index] < min(play_limits[cur_index], MAX_PLAYS):
                         found = True
                         break
                     cur_index = (cur_index + 1) % n

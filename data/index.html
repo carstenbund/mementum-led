@@ -128,8 +128,13 @@
         function sendData() {
             var textData = document.getElementById('Text').value;
             textData = selectedColor + textData;
+            // Attach this string's own repeat count, captured from the input at send
+            // time, so each message can repeat a different number of times.
+            var plays = parseInt(document.getElementById('maxPlays').value, 10);
+            var url = '/SendData?data=' + encodeURIComponent(textData);
+            if (!isNaN(plays)) url += '&plays=' + plays;
             var xhr = new XMLHttpRequest();
-            xhr.open('GET', '/SendData?data=' + encodeURIComponent(textData), true);
+            xhr.open('GET', url, true);
             xhr.onreadystatechange = function() {
                 if (xhr.readyState === 4 && xhr.status === 200) {
                     fetchSentStrings(); // Refresh only after the server stored it
@@ -207,6 +212,62 @@
             var xhr = new XMLHttpRequest();
             xhr.open('GET', url, true);
             xhr.send();
+        }
+
+        // Three distinct repeat controls:
+        //  - "Wiederholungen (nächster Text)" (#maxPlays): per-string count, read by
+        //    sendData() and passed as &plays=N, stored with that one string.
+        //  - "Standard-Wiederholungen" (#defaultPlays): the preset that pre-fills the
+        //    per-string box; used for any send that doesn't set an individual count.
+        //  - "Globales Wiederholungslimit" (#globalMaxPlays): the hard ceiling. No
+        //    string ever plays more than this (effective = min(perString, ceiling));
+        //    a live throttle over the whole wall.
+        // On load all seed from /getConfig; the per-string box pre-fills with the
+        // preset default (not the ceiling).
+        function fetchConfig() {
+            fetch('/getConfig').then(function(r) {
+                return r.ok ? r.json() : null;
+            }).then(function(d) {
+                if (!d) return;
+                document.getElementById('globalMaxPlays').value = d.max_plays;
+                document.getElementById('defaultPlays').value = d.default_plays;
+                document.getElementById('maxPlays').value = d.default_plays;
+            }).catch(function() {});
+        }
+
+        // Small helper: validate 1..99, POST to a config setter, flash a status hint,
+        // and run an optional onOk(data) with the server's confirmed value.
+        function pushConfigValue(route, inputId, statusId, onOk) {
+            var input = document.getElementById(inputId);
+            var status = document.getElementById(statusId);
+            var v = parseInt(input.value, 10);
+            if (isNaN(v) || v < 1 || v > 99) {
+                status.textContent = 'ungültig (1–99)';
+                return;
+            }
+            fetch(route + '?value=' + v).then(function(r) {
+                return r.ok ? r.json() : Promise.reject();
+            }).then(function(d) {
+                if (onOk) onOk(d);
+                status.textContent = 'gespeichert';
+                setTimeout(function() { status.textContent = ''; }, 1500);
+            }).catch(function() {
+                status.textContent = 'Fehler';
+            });
+        }
+
+        function setGlobalMaxPlays() {
+            pushConfigValue('/setMaxPlays', 'globalMaxPlays', 'globalMaxPlaysStatus',
+                function(d) { document.getElementById('globalMaxPlays').value = d.max_plays; });
+        }
+
+        function setDefaultPlays() {
+            pushConfigValue('/setDefaultPlays', 'defaultPlays', 'defaultPlaysStatus',
+                function(d) {
+                    document.getElementById('defaultPlays').value = d.default_plays;
+                    // Re-pre-fill the per-string box so the next text uses the new default.
+                    document.getElementById('maxPlays').value = d.default_plays;
+                });
         }
 
         function fetchSentStrings() {
@@ -300,11 +361,17 @@
         function displaySentStrings() {
             var list = document.getElementById('sentStringsList');
             list.innerHTML = '';
-            sentStrings.forEach(function(str, index) {
+            sentStrings.forEach(function(item, index) {
+                // Tolerate both the rich payload ({text,plays,limit}) and a bare string.
+                var text = (item && typeof item === 'object') ? item.text : item;
                 var option = document.createElement('div');
                 option.style.marginBottom = '5px';
-                option.innerHTML = `<input type="checkbox" id="sent${index}" value="${str}">
-                                    <label for="sent${index}">${str}</label>`;
+                var badge = '';
+                if (item && typeof item === 'object') {
+                    badge = ` <span class="muted">(${item.plays}/${item.limit}×)</span>`;
+                }
+                option.innerHTML = `<input type="checkbox" id="sent${index}" value="${text}">
+                                    <label for="sent${index}">${text}</label>${badge}`;
                 list.appendChild(option);
             });
         }
@@ -407,6 +474,7 @@
             fetchSentStrings();
             fetchPreMadeStrings();
             fetchFragments();
+            fetchConfig();
             fetchClients();
             statusTimer = setInterval(fetchClients, 2000);
             connectLog();
@@ -430,6 +498,22 @@
             <button value="SendData" id="btn1" onclick="sendData()">Anzeigen</button><p></p>
             <button value="ClearText" id="btnClear" onclick="clearText()">Alle Löschen</button>
             <!-- <button onclick="deleteSelectedEntries()">Löschen</button> -->
+            <div class="config-section" style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #ddd;">
+                <h4 style="margin: 0 0 6px 0;">Konfiguration</h4>
+                <div class="frag-row" style="align-items: center;">
+                    <label for="defaultPlays">Standard-Wiederholungen:</label>
+                    <input type="number" id="defaultPlays" min="1" max="99" step="1" value="3"
+                           style="width: 4em;" onchange="setDefaultPlays()">
+                    <span id="defaultPlaysStatus" class="muted"></span>
+                </div>
+                <div class="frag-row" style="align-items: center;">
+                    <label for="globalMaxPlays">Globales Wiederholungslimit (Obergrenze):</label>
+                    <input type="number" id="globalMaxPlays" min="1" max="99" step="1" value="3"
+                           style="width: 4em;" onchange="setGlobalMaxPlays()">
+                    <span id="globalMaxPlaysStatus" class="muted"></span>
+                </div>
+                <!-- weitere Konfigurationswerte können hier ergänzt werden -->
+            </div>
         </div>
         <div class="sent-strings-container">
             <h3>Text Angezeigt:</h3>
@@ -438,6 +522,10 @@
             </div>
             <p></p>
             <button value="PlayAgain" id="btnPlayAgain" onclick="playAgain()">Nochmal abspielen</button>
+            <div class="frag-row" style="margin-top: 8px; align-items: center;">
+                <label for="maxPlays">Wiederholungen (nächster Text):</label>
+                <input type="number" id="maxPlays" min="1" max="99" step="1" value="3" style="width: 4em;">
+            </div>
         </div>
         <div class="pre-made-container">
             <h3>Vorgaben:</h3>
