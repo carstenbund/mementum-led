@@ -214,41 +214,60 @@
             xhr.send();
         }
 
-        // Two distinct repeat controls:
+        // Three distinct repeat controls:
         //  - "Wiederholungen (nächster Text)" (#maxPlays): per-string count, read by
         //    sendData() and passed as &plays=N, stored with that one string.
-        //  - "Globales Wiederholungslimit" (#globalMaxPlays): the master ceiling. No
-        //    string ever plays more than this (effective = min(perString, global)); it
-        //    is a live throttle over the whole wall. Lives in the Konfiguration block.
-        // On load both seed from the server's global value (/getMaxPlays) so a fresh
-        // send defaults to the ceiling.
+        //  - "Standard-Wiederholungen" (#defaultPlays): the preset that pre-fills the
+        //    per-string box; used for any send that doesn't set an individual count.
+        //  - "Globales Wiederholungslimit" (#globalMaxPlays): the hard ceiling. No
+        //    string ever plays more than this (effective = min(perString, ceiling));
+        //    a live throttle over the whole wall.
+        // On load all seed from /getConfig; the per-string box pre-fills with the
+        // preset default (not the ceiling).
         function fetchConfig() {
-            fetch('/getMaxPlays').then(function(r) {
+            fetch('/getConfig').then(function(r) {
                 return r.ok ? r.json() : null;
             }).then(function(d) {
                 if (!d) return;
                 document.getElementById('globalMaxPlays').value = d.max_plays;
-                document.getElementById('maxPlays').value = d.max_plays;
+                document.getElementById('defaultPlays').value = d.default_plays;
+                document.getElementById('maxPlays').value = d.default_plays;
             }).catch(function() {});
         }
 
-        function setGlobalMaxPlays() {
-            var input = document.getElementById('globalMaxPlays');
-            var status = document.getElementById('globalMaxPlaysStatus');
+        // Small helper: validate 1..99, POST to a config setter, flash a status hint,
+        // and run an optional onOk(data) with the server's confirmed value.
+        function pushConfigValue(route, inputId, statusId, onOk) {
+            var input = document.getElementById(inputId);
+            var status = document.getElementById(statusId);
             var v = parseInt(input.value, 10);
             if (isNaN(v) || v < 1 || v > 99) {
                 status.textContent = 'ungültig (1–99)';
                 return;
             }
-            fetch('/setMaxPlays?value=' + v).then(function(r) {
+            fetch(route + '?value=' + v).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
             }).then(function(d) {
-                input.value = d.max_plays;
+                if (onOk) onOk(d);
                 status.textContent = 'gespeichert';
                 setTimeout(function() { status.textContent = ''; }, 1500);
             }).catch(function() {
                 status.textContent = 'Fehler';
             });
+        }
+
+        function setGlobalMaxPlays() {
+            pushConfigValue('/setMaxPlays', 'globalMaxPlays', 'globalMaxPlaysStatus',
+                function(d) { document.getElementById('globalMaxPlays').value = d.max_plays; });
+        }
+
+        function setDefaultPlays() {
+            pushConfigValue('/setDefaultPlays', 'defaultPlays', 'defaultPlaysStatus',
+                function(d) {
+                    document.getElementById('defaultPlays').value = d.default_plays;
+                    // Re-pre-fill the per-string box so the next text uses the new default.
+                    document.getElementById('maxPlays').value = d.default_plays;
+                });
         }
 
         function fetchSentStrings() {
@@ -482,7 +501,13 @@
             <div class="config-section" style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #ddd;">
                 <h4 style="margin: 0 0 6px 0;">Konfiguration</h4>
                 <div class="frag-row" style="align-items: center;">
-                    <label for="globalMaxPlays">Globales Wiederholungslimit:</label>
+                    <label for="defaultPlays">Standard-Wiederholungen:</label>
+                    <input type="number" id="defaultPlays" min="1" max="99" step="1" value="3"
+                           style="width: 4em;" onchange="setDefaultPlays()">
+                    <span id="defaultPlaysStatus" class="muted"></span>
+                </div>
+                <div class="frag-row" style="align-items: center;">
+                    <label for="globalMaxPlays">Globales Wiederholungslimit (Obergrenze):</label>
                     <input type="number" id="globalMaxPlays" min="1" max="99" step="1" value="3"
                            style="width: 4em;" onchange="setGlobalMaxPlays()">
                     <span id="globalMaxPlaysStatus" class="muted"></span>

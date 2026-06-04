@@ -43,11 +43,12 @@ app = Flask(__name__)
 
 # ---- Configuration (mirrors ws_wifi.h / ws_flow.h) ----
 MAX_SENT_STRINGS = 5          # compact FIFO depth (matches firmware)
-MAX_PLAYS = 3                 # global repeat ceiling: no string plays more than this,
-                              # regardless of its per-string limit (effective = min of the
-                              # two). Also the default for sends that omit a count. Live-
-                              # adjustable via /setMaxPlays as a master throttle.
-MIN_MAX_PLAYS = 1             # lower bound for the play count
+MAX_PLAYS = 3                 # global repeat ceiling (hard cap): no string plays more
+                              # than this, regardless of its per-string limit
+                              # (effective = min of the two). Live master throttle.
+DEFAULT_PLAYS = 3            # preset repeat count inserted when a send doesn't specify
+                              # an individual one. Independent of the ceiling.
+MIN_MAX_PLAYS = 1             # lower bound for any play count
 MAX_MAX_PLAYS = 99           # upper bound (sanity cap)
 HEARTBEAT_TIMEOUT = 80        # seconds (HEARTBEAT_TIMEOUT)
 CLEANUP_INTERVAL = 30         # seconds (CLEANUP_INTERVAL)
@@ -212,11 +213,11 @@ def clamp_plays(value):
 def add_sent_string(s, limit=None):
     """Append to the compact FIFO, dropping the oldest when full and resetting the
     new slot's play count so the message is actually shown (mirrors addSentString).
-    `limit` is this message's own repeat cap; defaults to the server default MAX_PLAYS."""
+    `limit` is this message's own repeat count; defaults to the preset DEFAULT_PLAYS."""
     global cur_index
     sent_strings.append(s)
     play_counts.append(0)
-    play_limits.append(clamp_plays(MAX_PLAYS if limit is None else limit))
+    play_limits.append(clamp_plays(DEFAULT_PLAYS if limit is None else limit))
     if len(sent_strings) > MAX_SENT_STRINGS:
         sent_strings.pop(0)
         play_counts.pop(0)
@@ -510,28 +511,51 @@ def reset_play_count():
     return "Play counts reset.", 200
 
 
-@app.route("/getMaxPlays")
-def get_max_plays():
-    # Global repeat ceiling (master throttle) + default for sends omitting a count.
-    return jsonify({"max_plays": MAX_PLAYS})
+@app.route("/getConfig")
+def get_config():
+    # All live-adjustable config values (extend this dict as more are added).
+    return jsonify({"max_plays": MAX_PLAYS, "default_plays": DEFAULT_PLAYS})
+
+
+def _parse_plays_value():
+    """Validate the ?value= arg shared by the play-count config setters.
+    Returns (value, None) on success or (None, (msg, status)) on error."""
+    raw = request.args.get("value", "")
+    if not raw.lstrip("-").isdigit():
+        return None, ("Missing or non-numeric value parameter.", 400)
+    value = int(raw)
+    if value < MIN_MAX_PLAYS or value > MAX_MAX_PLAYS:
+        return None, ("Value out of range (%d..%d)." % (MIN_MAX_PLAYS, MAX_MAX_PLAYS), 400)
+    return value, None
 
 
 @app.route("/setMaxPlays")
 def set_max_plays():
-    # Adjust the global ceiling. Takes effect immediately on the next sequencer pass:
-    # lowering it throttles every string down to the new cap; raising it lets strings
-    # whose per-string limit is higher resume playing. Per-string limits are unchanged.
+    # Hard ceiling: no string ever plays more than this (effective = min(per-string,
+    # ceiling)). Takes effect on the next sequencer pass -- lowering it throttles every
+    # string down to the new cap, raising it lets higher per-string limits resume.
     global MAX_PLAYS
-    raw = request.args.get("value", "")
-    if not raw.lstrip("-").isdigit():
-        return "Missing or non-numeric value parameter.", 400
-    value = int(raw)
-    if value < MIN_MAX_PLAYS or value > MAX_MAX_PLAYS:
-        return "Value out of range (%d..%d)." % (MIN_MAX_PLAYS, MAX_MAX_PLAYS), 400
+    value, err = _parse_plays_value()
+    if err:
+        return err
     with state_lock:
         MAX_PLAYS = value
-    log.emit("CONFIG    max_plays -> %d" % value)
+    log.emit("CONFIG    max_plays (ceiling) -> %d" % value)
     return jsonify({"max_plays": MAX_PLAYS})
+
+
+@app.route("/setDefaultPlays")
+def set_default_plays():
+    # Preset repeat count inserted into a new string when the send omits one. Does not
+    # touch existing strings or the ceiling.
+    global DEFAULT_PLAYS
+    value, err = _parse_plays_value()
+    if err:
+        return err
+    with state_lock:
+        DEFAULT_PLAYS = value
+    log.emit("CONFIG    default_plays -> %d" % value)
+    return jsonify({"default_plays": DEFAULT_PLAYS})
 
 
 @app.route("/deleteSelected")
