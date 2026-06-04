@@ -608,7 +608,10 @@ static uint32_t macHash() {
 // BSSID than our own SoftAP MAC (the server uses this to decide whether to abdicate).
 static bool scanForServerNetwork(bool *outLowerBssid) {
     if (outLowerBssid) *outLowerBssid = false;
-    int n = WiFi.scanNetworks(false /*async*/, false /*show hidden*/);
+    // Our AP is pinned to channel 1, so scan only channel 1 with a short dwell. A full
+    // all-channel scan blocks loop() for seconds and can trip the task watchdog (reboot).
+    int n = WiFi.scanNetworks(false /*async*/, false /*hidden*/, false /*passive*/,
+                              300 /*ms per channel*/, 1 /*channel*/);
     bool present = false;
     uint8_t myAp[6];
     WiFi.softAPmacAddress(myAp);
@@ -827,6 +830,11 @@ void WIFI_Init()
   backoffSlot = macHash() % SPREAD_MS;
   WiFi.onEvent(WiFiEvent); // Attach the STA event handler (drives reconnect/registration)
 
+  // Bring the WiFi/LWIP stack up (as an STA, starting the election) BEFORE server.begin()
+  // and the web-server task. Starting the HTTP server while WiFi is still uninitialised
+  // crashes/boot-loops the device.
+  enterJoining();
+
   // The HTTP routes run on every node: a server answers /register,/time,/heartbeat,... and
   // a client answers /play,/clear over the same WebServer. So they are always registered.
   server.on("/"           ,handleRoot);
@@ -868,10 +876,6 @@ void WIFI_Init()
         1,                    // Priority
         NULL                  // Task handle
     );
-
-    // Start the election as a would-be client: scan/join, and only promote if no server
-    // turns up. This is the single entry point for every node, regardless of hardware.
-    enterJoining();
 }
 
 // Tick the failover state machine. Each branch is non-blocking apart from the periodic
