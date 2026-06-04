@@ -5,7 +5,7 @@
 #include <SPIFFS.h>
 
 char Project[20] = "mementumLED";
-char Version[20] = "1.4.2";
+char Version[20] = "1.4.3";
 
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";

@@ -40,9 +40,13 @@ static uint32_t millisBase  = 0; // millis() at anchor point
 
 // Convert any millis() value to a Unix epoch second.
 // Returns 0 if the browser hasn't set the anchor yet.
+// Uses signed delta so events that occurred before the browser connected
+// (firstSeen < millisBase) are still calculated correctly instead of wrapping.
 static uint32_t toEpoch(uint32_t ms) {
     if (epochBase == 0) return 0;
-    return epochBase + (ms - millisBase) / 1000;
+    int32_t deltaSec = (int32_t)(ms - millisBase) / 1000;
+    int32_t result   = (int32_t)epochBase + deltaSec;
+    return result > 0 ? (uint32_t)result : 0;
 }
 
 struct registeredClient {
@@ -50,6 +54,7 @@ struct registeredClient {
     int id;
     uint32_t firstSeen;  // millis() at registration
     uint32_t lastSeen;   // millis() at last heartbeat
+    String   version;    // firmware version reported on /register?version=
 };
 
 std::vector<registeredClient> registeredClients;
@@ -250,6 +255,7 @@ void handleRoot() {
 void handleRegister() {
     IPAddress clientIP = server.client().remoteIP();
     uint32_t currentTime = millis();
+    String ver = server.hasArg("version") ? server.arg("version") : "";
 
     // Check if the client is already registered
     auto it = std::find_if(registeredClients.begin(), registeredClients.end(),
@@ -259,8 +265,8 @@ void handleRegister() {
         // Assign a new monotonic ID. Using the vector size would reuse IDs after a
         // cleanup erases an entry, causing ID collisions and heartbeat mismatches.
         int newId = nextClientId++;
-        registeredClients.push_back({clientIP, newId, currentTime, currentTime});
-        printf("New client registered: ID=%d, IP=%s\r\n", newId, clientIP.toString().c_str());
+        registeredClients.push_back({clientIP, newId, currentTime, currentTime, ver});
+        printf("New client registered: ID=%d, IP=%s, ver=%s\r\n", newId, clientIP.toString().c_str(), ver.c_str());
         server.send(200, "text/plain", "Registered successfully. Your ID: " + String(newId));
     } else {
         // Update lastSeen for existing client
@@ -595,7 +601,7 @@ void handleClients() {
         if (i > 0) json += ",";
         json += "{\"id\":" + String(c.id) +
                 ",\"ip\":\"" + c.ip.toString() + "\"" +
-                ",\"version\":\"\"" +
+                ",\"version\":\"" + c.version + "\"" +
                 ",\"active\":" + (active ? "true" : "false") +
                 ",\"age\":" + String(age / 1000) +
                 ",\"first_seen\":" + String(toEpoch(c.firstSeen)) +
