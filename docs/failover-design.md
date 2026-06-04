@@ -137,18 +137,20 @@ infrequent so connected clients are not disrupted.
   it may promote and create a real second network in its own RF zone. That is inherent to
   wireless; we assume all nodes are in range of each other.
 
-## 9. Parameters (initial proposal, all tunable / compile-time)
+## 9. Parameters (as implemented — `ws_wifi.cpp`, all compile-time / tunable)
 
-| Name | Proposed | Meaning |
+| Name | Value | Meaning |
 |---|---|---|
-| `T_grace_cold` | 3000 ms | absence before promoting on first boot (no server ever seen) |
-| `T_grace_fail` | 8000 ms | absence before promoting after losing a known server (rides out quick reboots) |
-| `SPREAD_MS` | 8000 ms | width of the MAC-hashed backoff window |
-| `J` (jitter) | 0–500 ms | extra random spread on top of the slot |
-| `scan_interval` | 2000 ms | CANDIDATE scan cadence (scan itself ~1.5 s) |
-| `server_scan_interval` | 10000 ms | SERVER abdication-check cadence |
-| `heartbeat_fail_N` | 3 | consecutive heartbeat failures that declare the server lost |
-| `promotion_cooldown` | 15000 ms | min time between abdication/promotion attempts (anti-flap) |
+| `T_GRACE_COLD` | 3000 ms | absence before promoting on first boot (no server ever seen) |
+| `T_GRACE_FAIL` | 8000 ms | absence before promoting after losing a known server (rides out quick reboots) |
+| `SPREAD_MS` | 5000 ms | width of the MAC-hashed backoff window (small: speed over safety) |
+| `JITTER_MS` | 0–500 ms | extra random spread on top of the slot |
+| `JOIN_GRACE_COLD` / `JOIN_GRACE_WARM` | 3000 / 6000 ms | time a `JOINING` node tries to associate before scanning to decide whether to contest |
+| `SCAN_INTERVAL` | 2000 ms | CANDIDATE scan cadence (scan itself ~1.5 s) |
+| `SERVER_SCAN_INTERVAL` | 6000 ms | SERVER abdication-check cadence |
+| `ABDICATION_WINDOW` | 60000 ms | only scan for competitors this long after promoting; afterwards a lone server never pauses its AP |
+| `HEARTBEAT_FAIL_N` | 3 | consecutive heartbeat failures that declare the server lost (secondary to WiFi-link loss) |
+| `PROMOTION_COOLDOWN` | 15000 ms | min time between abdication/promotion attempts (anti-flap) |
 
 ## 10. Firmware changes (sketch — for the eventual implementation)
 
@@ -199,16 +201,18 @@ infrequent so connected clients are not disrupted.
    for faster failover now that collisions self-heal.
 3. **Phase 3 (optional)** — queue/state hand-off; `preferServer` hint; `config.csv` toggles.
 
-## 14. Open questions for review
+## 14. Resolved decisions
 
-1. **Failover speed vs safety** — accept ~10–20 s typical failover (modest `SPREAD_MS` +
-   abdication), or prefer slower-but-collision-free (large `SPREAD_MS`, skip abdication in v1)?
-2. **`preferServer` hint** — keep a zero-config pure-MAC order, or allow one node to be marked
-   as the preferred cold-boot leader (shorter backoff)? (You chose MAC-auto; this is just an
-   optional override.)
-3. **Panel while electing** — during `JOINING`/`CANDIDATE`, hold the last frame, blank, or show
-   a small status glyph?
-4. **Empty queue on promotion** — confirm v1 accepts losing the message queue on failover
-   (no hand-off).
-5. **Scope of first cut** — Phase 1 only, or Phase 1+2 together (abdication included from the
-   start)?
+1. **Speed over safety.** Use a modest `SPREAD_MS` for fast failover and rely on lowest-BSSID
+   abdication (§7) to clean up the rare case where a lower-MAC node appears at nearly the same
+   time. We do **not** trade failover speed for collision-free promotion.
+2. **Pure MAC.** No `preferServer` hint; role order is derived entirely from the MAC. Zero
+   config.
+3. **Spinner while electing.** During `JOINING`/`CANDIDATE` the panel shows a small rotating
+   glyph cycling `| / - \` to indicate "configuring / waiting for network," rather than holding
+   the last frame or blanking.
+4. **Empty queue on promotion is fine.** No state hand-off; each client keeps its own presets,
+   so a freshly promoted server starting with an empty queue is acceptable.
+5. **Phase 1 + 2 together.** Ship the state machine, MAC-hashed backoff, final guard scan, **and**
+   lowest-BSSID abdication + cooldown in the first cut, so dual-AP self-heals from day one. This
+   also lets `SPREAD_MS` stay small (decision 1).
