@@ -158,8 +158,12 @@ void setup() {
     // Build the banner from Version so the displayed/flashed version can never drift
     // from the protocol again (old 1.2 spoke a different /play protocol than the server).
     // Role is no longer known at boot (it is elected at runtime), so the banner is neutral.
+    // Render it synchronously (not as a background task): the election spinner also drives
+    // the LED matrix from loop(), and two tasks hitting the NeoPixel driver at once crashes.
     String banner = String("  ") + Project + " node " + Version;
-    displayText(banner.c_str());
+    char bannerBuf[64];
+    banner.toCharArray(bannerBuf, sizeof(bannerBuf));
+    xdisplayText(bannerBuf);
 }
 
 // Main loop

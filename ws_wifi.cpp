@@ -301,7 +301,8 @@ void sendHeartbeat() {
         printf("Heartbeat failed. code=%d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
         dynamicHeartbeatInterval = min(dynamicHeartbeatInterval * 2, HEARTBEAT_TIMEOUT); // Increase interval
         clientId = -1;        // Force re-registration to get a fresh ID
-        isConnected = false;
+        // Do NOT clear isConnected here — WiFi is still up, only the HTTP server
+        // went away. The server-reachability retry in WIFI_Loop() handles recovery.
     }
     http.end();
 }
@@ -608,7 +609,10 @@ static uint32_t macHash() {
 // BSSID than our own SoftAP MAC (the server uses this to decide whether to abdicate).
 static bool scanForServerNetwork(bool *outLowerBssid) {
     if (outLowerBssid) *outLowerBssid = false;
-    int n = WiFi.scanNetworks(false /*async*/, false /*show hidden*/);
+    // Our AP is pinned to channel 1, so scan only channel 1 with a short dwell. A full
+    // all-channel scan blocks loop() for seconds and can trip the task watchdog (reboot).
+    int n = WiFi.scanNetworks(false /*async*/, false /*hidden*/, false /*passive*/,
+                              300 /*ms per channel*/, 1 /*channel*/);
     bool present = false;
     uint8_t myAp[6];
     WiFi.softAPmacAddress(myAp);
@@ -748,6 +752,28 @@ static void tickClient() {
     }
     roleSince = millis(); // still connected: keep pushing out the blip window
 
+    // WiFi is up but we have no server registration (server restarted and cleared its
+    // registry, or a heartbeat was rejected): re-register promptly, with its own backoff,
+    // without disturbing the WiFi link. Avoids waiting out the slow CANDIDATE path for the
+    // common "server rebooted fast, AP came back" case.
+    if (clientId == -1) {
+        static unsigned long lastReg = 0;
+        static unsigned long regDelay = 1000;
+        if (millis() - lastReg >= regDelay) {
+            lastReg = millis();
+            isConnected = true;           // WiFi is up; let register/sync proceed
+            registerWithServer();
+            if (clientId != -1) {
+                regDelay = 1000;          // reset backoff on success
+                heartbeatFailures = 0;
+                syncClock();
+            } else {
+                regDelay = min(regDelay * 2, maxRetryDelay);
+            }
+        }
+        return;
+    }
+
     if (millis() - lastHeartbeat >= heartbeatInterval) {
         lastHeartbeat = millis();
         sendHeartbeat();              // clears isConnected on failure
@@ -827,6 +853,11 @@ void WIFI_Init()
   backoffSlot = macHash() % SPREAD_MS;
   WiFi.onEvent(WiFiEvent); // Attach the STA event handler (drives reconnect/registration)
 
+  // Bring the WiFi/LWIP stack up (as an STA, starting the election) BEFORE server.begin()
+  // and the web-server task. Starting the HTTP server while WiFi is still uninitialised
+  // crashes/boot-loops the device.
+  enterJoining();
+
   // The HTTP routes run on every node: a server answers /register,/time,/heartbeat,... and
   // a client answers /play,/clear over the same WebServer. So they are always registered.
   server.on("/"           ,handleRoot);
@@ -868,10 +899,6 @@ void WIFI_Init()
         1,                    // Priority
         NULL                  // Task handle
     );
-
-    // Start the election as a would-be client: scan/join, and only promote if no server
-    // turns up. This is the single entry point for every node, regardless of hardware.
-    enterJoining();
 }
 
 // Tick the failover state machine. Each branch is non-blocking apart from the periodic
