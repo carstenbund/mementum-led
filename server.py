@@ -617,9 +617,11 @@ def effect():
                overlaps into a glide, >1 leaves a gap; for 'tile', <1 tightens the overlap,
                >1 opens it up to compensate for a physical bezel gap between panels.
 
-    Note: panels scroll right->left, so list `order` right-to-left (or use reverse=1) for
-    the sweep/marquee to travel the way you expect.
-      reverse  '1' to flip the sweep direction across the panel order.
+    Note: panels scroll right->left, so reverse defaults to ON -- the natural id order
+    (or the list from /identify) then travels the way you read the wall. Either leave
+    `order` empty / natural with reverse on, or list it right-to-left with reverse=0.
+      reverse  flip the sweep direction across the panel order. DEFAULT ON, because the
+               panels scroll right->left; pass reverse=0 to disable.
       lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
       waves    replay the whole sweep this many times (default 1).
       gap      ms of darkness between waves (default = stagger).
@@ -659,7 +661,9 @@ def effect():
     lead = _int_arg('lead', DISPLAY_LEAD_MS, lo=0, hi=10000)
     waves = _int_arg('waves', 1, lo=1, hi=EFFECT_MAX_WAVES)
     gap = _int_arg('gap', stagger, lo=0, hi=10000)
-    reverse = request.args.get('reverse', '0') not in ('0', '', 'false', 'False')
+    # Default ON: panels scroll right->left, so reversing the natural id order (0,1,2,..)
+    # makes the sweep/marquee travel the way you read the wall. Pass reverse=0 to disable.
+    reverse = request.args.get('reverse', '1') not in ('0', '', 'false', 'False')
 
     with state_lock:
         targets = snapshot_targets()  # [(ip, cid), ...] active clients only
