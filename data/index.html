@@ -517,9 +517,14 @@
             if (factor) p.set('factor', factor);
             var waves = parseInt(document.getElementById('effectWaves').value, 10);
             if (!isNaN(waves) && waves > 1) p.set('waves', waves);
+            var lead = parseInt(document.getElementById('effectLead').value, 10);
+            if (!isNaN(lead)) p.set('lead', lead);
+            var gap = parseInt(document.getElementById('effectGap').value, 10);
+            if (!isNaN(gap)) p.set('gap', gap);
             var order = document.getElementById('effectOrder').value.trim();
             if (order) p.set('order', order);
-            if (document.getElementById('effectReverse').checked) p.set('reverse', '1');
+            // Always send the explicit state so unticking truly disables the (default-on) reverse.
+            p.set('reverse', document.getElementById('effectReverse').checked ? '1' : '0');
             effectStatus('Starte Effekt…');
             fetch('/effect?' + p.toString()).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
@@ -665,15 +670,27 @@
                 <label for="effectFactor">Faktor:</label>
                 <input type="number" id="effectFactor" min="0.05" max="5" step="0.05" value="1"
                        style="width: 4em;" title="<1 = überlappender Gleitflug, 1 = sauberer Sprung, >1 = Lücke">
+            </div>
+            <div class="frag-row" style="align-items: center;">
                 <label for="effectWaves">Wellen:</label>
                 <input type="number" id="effectWaves" min="1" max="20" step="1" value="1"
                        style="width: 4em;">
+                <label for="effectLead">Vorlauf (ms):</label>
+                <input type="number" id="effectLead" min="0" max="10000" step="100" value="800"
+                       style="width: 5em;" title="Verzögerung vor (Neu-)Start – kleiner = schnellerer Neustart">
+                <label for="effectGap">Pause (ms):</label>
+                <input type="number" id="effectGap" min="0" max="10000" step="100" value="0"
+                       style="width: 5em;" title="zusätzliche Pause zwischen Wiederholungen (Wellen)">
             </div>
             <div class="frag-row" style="align-items: center;">
                 <label for="effectOrder">Reihenfolge (IDs):</label>
-                <input type="text" id="effectOrder" placeholder="z. B. 2,0,1" style="width: 8em;">
-                <label><input type="checkbox" id="effectReverse"> Rückwärts</label>
+                <input type="text" id="effectOrder" placeholder="leer = 0,1,2,3,4" style="width: 8em;">
+                <label><input type="checkbox" id="effectReverse" checked> Rückwärts</label>
                 <button onclick="runEffect()">Effekt starten</button>
+            </div>
+            <div class="muted" style="margin-bottom: 6px;">
+                Panels laufen rechts&rarr;links, daher ist &bdquo;Rückwärts&ldquo;
+                voreingestellt &ndash; natürliche Reihenfolge (0,1,2,3,4) bzw. leer lassen.
             </div>
             <div class="frag-row" style="align-items: center;">
                 <span class="muted">Schnell:</span>

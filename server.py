@@ -56,6 +56,11 @@ HEARTBEAT_TIMEOUT = 80        # seconds (HEARTBEAT_TIMEOUT)
 CLEANUP_INTERVAL = 30         # seconds (CLEANUP_INTERVAL)
 SCROLL_INTERVAL_MS = 120      # ms per pixel step (SCROLL_INTERVAL_MS)
 DISPLAY_LEAD_MS = 2000        # lead time before a scheduled start (DISPLAY_LEAD_MS)
+TILE_STAGGER_MS = 900         # 'tile' marquee per-panel offset. Empirically a hair under
+                              # one full 8-px panel (8*120 = 960 ms): starting the next
+                              # panel ~900 ms in lights it the instant the content drops off
+                              # the previous one, so there is no seam at the join and the
+                              # panels read as one long 16/24/32-wide display.
 MATRIX_WIDTH = 8              # Matrix.width()
 BROADCAST_TIMEOUT = 2.0       # seconds per /play request (firmware uses 2000 ms)
 
@@ -152,6 +157,8 @@ PURGE_INACTIVE = 3600         # seconds: drop a disappeared client from the tabl
 # different start time, so it appears to travel across the wall ("a thing moving through").
 # While an effect is running the sequencer pauses so it does not overwrite the sweep.
 effect_until = 0.0            # time.monotonic() until which the sequencer holds off
+effect_generation = 0         # bumped on each /effect; a running worker stops when it sees
+                              # a newer generation, so re-triggering supersedes cleanly
 EFFECT_MAX_WAVES = 20         # safety cap on repeated sweeps per /effect call
 
 _clock_start = time.monotonic()
@@ -571,25 +578,39 @@ def _float_arg(name, default, lo=None, hi=None):
     return value
 
 
-def run_effect(ordered, data, stagger, lead, waves, gap, wave_len):
-    """Fire one or more staggered sweeps across the panels (runs in its own thread).
+def run_effect(gen, ordered, data, stagger, lead, waves, gap, full_go):
+    """Pipelined sweeps (runs in its own thread).
 
-    Each wave re-reads the live clock so repeated sweeps never drift, and paces itself so
-    the next wave starts only after the previous one has cleared the last panel + `gap`.
+    Each panel loops on its OWN period (full_go + gap), phase-offset by k*stagger, and we
+    deliver each panel's next schedule ~lead ms before its start instant. So the first
+    panel restarts the moment IT finishes -- while the last panel is still playing the
+    previous pass -- and repeats have no whole-wave gap. Stops early if a newer effect
+    (generation) supersedes this one.
     """
     global global_seq
-    for w in range(waves):
+    period = full_go + gap
+    t0 = time.monotonic()
+    base = (server_now() + lead) & 0xFFFFFFFF
+    # Build every panel's fire events up front; deliver them in time order. Each panel k
+    # plays at base + k*stagger + w*period, sent at real time t0 + that offset (which is
+    # `lead` ms before the start instant, the headroom for the /play to arrive).
+    events = []  # (send_offset_seconds, ip, at)
+    for k, (ip, _cid) in enumerate(ordered):
+        for w in range(waves):
+            off_ms = k * stagger + w * period
+            at = (base + off_ms) & 0xFFFFFFFF
+            events.append((off_ms / 1000.0, ip, at))
+    events.sort()
+    for send_rel, ip, at in events:
+        dt = t0 + send_rel - time.monotonic()
+        if dt > 0:
+            time.sleep(dt)
         with state_lock:
+            if gen != effect_generation:
+                return                       # superseded by a newer effect / stopped
             global_seq += 1
             seq = global_seq
-        base = (server_now() + lead) & 0xFFFFFFFF
-        sched = [(ip, cid, (base + k * stagger) & 0xFFFFFFFF)
-                 for k, (ip, cid) in enumerate(ordered)]
-        ok = broadcast_play_staggered(seq, data, sched)
-        log.emit("EFFECT    wave %d/%d seq=%d panels=%d ok=%d data=%r"
-                 % (w + 1, waves, seq, len(ordered), ok, data))
-        # send -> first panel at +lead, last panel finishes at +lead+wave_len; +gap idle.
-        time.sleep((lead + wave_len + gap) / 1000.0)
+        broadcast_play_each([(ip, {'seq': seq, 'at': at, 'data': data})])
 
 
 @app.route("/effect")
@@ -604,17 +625,25 @@ def effect():
                  'auto' (default) = one full display of the content on a node ('a full
                    go'), from scroll_duration_ms() which sums each letter's real width via
                    the getCharWidth hint, so narrow letters (i, l, !, .) stagger correctly;
-                 'tile' = exactly one panel width (8 px), so the content tiles into one
-                   long continuous marquee across the whole wall (leaves one node, enters
-                   the next);
+                 'tile' = ~one panel width (TILE_STAGGER_MS, 900 ms), so the content tiles
+                   seamlessly into one long continuous marquee across the whole wall
+                   (leaves one node, enters the next);
                  a number = fixed ms.
       factor   scales the auto/tile stagger (default 1.0): for 'auto', 1 = clean hop, <1
-               overlaps into a glide, >1 leaves a gap; for 'tile', >1 compensates for a
-               physical bezel gap between panels.
-      reverse  '1' to flip the sweep direction across the panel order.
-      lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
+               overlaps into a glide, >1 leaves a gap; for 'tile', <1 tightens the overlap,
+               >1 opens it up to compensate for a physical bezel gap between panels.
+
+    Note: panels scroll right->left, so reverse defaults to ON -- the natural id order
+    (or the list from /identify) then travels the way you read the wall. Either leave
+    `order` empty / natural with reverse on, or list it right-to-left with reverse=0.
+      reverse  flip the sweep direction across the panel order. DEFAULT ON, because the
+               panels scroll right->left; pass reverse=0 to disable.
+      lead     ms before each (re)start -- the delay from trigger to first pixel, and the
+               blank between repeated waves (default DISPLAY_LEAD_MS, 2000). It exists so
+               every panel receives the /play before the start instant; for a handful of
+               local panels a few hundred ms is plenty, so lower it for a snappier restart.
       waves    replay the whole sweep this many times (default 1).
-      gap      ms of darkness between waves (default = stagger).
+      gap      extra ms of darkness between waves, on top of lead (default 0).
       order    explicit comma-separated client IDs giving the sweep order
                (default: ascending client id). Use this to match your physical layout.
 
@@ -623,7 +652,7 @@ def effect():
               /effect?factor=0.5      -> overlap into a continuous glide
               /effect?stagger=700&waves=3
     """
-    global effect_until
+    global effect_until, effect_generation
 
     data = request.args.get('data', '*')[:MAX_TEXT_LENGTH]
 
@@ -633,17 +662,16 @@ def effect():
     # tunes it; a numeric `stagger` overrides with a fixed value in ms.
     factor = _float_arg('factor', 1.0, lo=0.05, hi=5.0)
     full_go = scroll_duration_ms(data)
-    tile_stagger = MATRIX_WIDTH * SCROLL_INTERVAL_MS  # one panel width of scroll (960 ms)
     raw_stagger = request.args.get('stagger', 'auto').strip().lower()
     if raw_stagger.lstrip('-').isdigit():
         stagger = max(0, min(5000, int(raw_stagger)))
         stagger_mode = 'fixed'
     elif raw_stagger == 'tile':
-        # Continuous "long display": offset each panel by exactly one panel width so the
-        # content tiles seamlessly across the wall -- what scrolls off one node enters the
-        # next, turning the panels into one long marquee. factor > 1 compensates for a
-        # physical gap/bezel between panels (a touch more than 8 px of travel per panel).
-        stagger = max(1, min(5000, round(tile_stagger * factor)))
+        # Continuous "long display": offset each panel by ~one panel width so the content
+        # tiles seamlessly across the wall -- what scrolls off one node enters the next,
+        # turning the panels into one long marquee. factor < 1 tightens the overlap; > 1
+        # opens it up to compensate for a physical gap/bezel between panels.
+        stagger = max(1, min(5000, round(TILE_STAGGER_MS * factor)))
         stagger_mode = 'tile'
     else:  # 'auto' (default): one full display of the content per panel (a discrete hop)
         stagger = max(1, min(5000, round(full_go * factor)))
@@ -651,8 +679,10 @@ def effect():
 
     lead = _int_arg('lead', DISPLAY_LEAD_MS, lo=0, hi=10000)
     waves = _int_arg('waves', 1, lo=1, hi=EFFECT_MAX_WAVES)
-    gap = _int_arg('gap', stagger, lo=0, hi=10000)
-    reverse = request.args.get('reverse', '0') not in ('0', '', 'false', 'False')
+    gap = _int_arg('gap', 0, lo=0, hi=10000)
+    # Default ON: panels scroll right->left, so reversing the natural id order (0,1,2,..)
+    # makes the sweep/marquee travel the way you read the wall. Pass reverse=0 to disable.
+    reverse = request.args.get('reverse', '1') not in ('0', '', 'false', 'False')
 
     with state_lock:
         targets = snapshot_targets()  # [(ip, cid), ...] active clients only
@@ -670,16 +700,19 @@ def effect():
             return jsonify({"status": "error", "message": "No active clients."}), 400
 
         n = len(ordered)
-        span = (n - 1) * stagger                  # first-panel-start .. last-panel-start
-        wave_len = span + scroll_duration_ms(data)  # until the last panel finishes scrolling
-        total_ms = waves * (lead + wave_len + gap)
+        period = full_go + gap
+        # Pipelined: the last panel's last wave starts at lead + (n-1)*stagger +
+        # (waves-1)*period and then scrolls for full_go.
+        total_ms = lead + (n - 1) * stagger + (waves - 1) * period + full_go
+        effect_generation += 1            # supersede any effect already running
+        my_gen = effect_generation
         # Hold the sequencer off for the whole effect so it cannot overwrite the sweep.
         effect_until = time.monotonic() + total_ms / 1000.0
 
     log.emit("EFFECT    start data=%r panels=%d stagger=%dms(%s) waves=%d (~%.1fs)"
              % (data, n, stagger, stagger_mode, waves, total_ms / 1000.0))
     threading.Thread(target=run_effect,
-                     args=(ordered, data, stagger, lead, waves, gap, wave_len),
+                     args=(my_gen, ordered, data, stagger, lead, waves, gap, full_go),
                      daemon=True).start()
 
     return jsonify({"status": "ok", "panels": n, "order": [cid for _ip, cid in ordered],
