@@ -56,6 +56,11 @@ HEARTBEAT_TIMEOUT = 80        # seconds (HEARTBEAT_TIMEOUT)
 CLEANUP_INTERVAL = 30         # seconds (CLEANUP_INTERVAL)
 SCROLL_INTERVAL_MS = 120      # ms per pixel step (SCROLL_INTERVAL_MS)
 DISPLAY_LEAD_MS = 2000        # lead time before a scheduled start (DISPLAY_LEAD_MS)
+TILE_STAGGER_MS = 900         # 'tile' marquee per-panel offset. Empirically a hair under
+                              # one full 8-px panel (8*120 = 960 ms): starting the next
+                              # panel ~900 ms in lights it the instant the content drops off
+                              # the previous one, so there is no seam at the join and the
+                              # panels read as one long 16/24/32-wide display.
 MATRIX_WIDTH = 8              # Matrix.width()
 BROADCAST_TIMEOUT = 2.0       # seconds per /play request (firmware uses 2000 ms)
 
@@ -604,13 +609,16 @@ def effect():
                  'auto' (default) = one full display of the content on a node ('a full
                    go'), from scroll_duration_ms() which sums each letter's real width via
                    the getCharWidth hint, so narrow letters (i, l, !, .) stagger correctly;
-                 'tile' = exactly one panel width (8 px), so the content tiles into one
-                   long continuous marquee across the whole wall (leaves one node, enters
-                   the next);
+                 'tile' = ~one panel width (TILE_STAGGER_MS, 900 ms), so the content tiles
+                   seamlessly into one long continuous marquee across the whole wall
+                   (leaves one node, enters the next);
                  a number = fixed ms.
       factor   scales the auto/tile stagger (default 1.0): for 'auto', 1 = clean hop, <1
-               overlaps into a glide, >1 leaves a gap; for 'tile', >1 compensates for a
-               physical bezel gap between panels.
+               overlaps into a glide, >1 leaves a gap; for 'tile', <1 tightens the overlap,
+               >1 opens it up to compensate for a physical bezel gap between panels.
+
+    Note: panels scroll right->left, so list `order` right-to-left (or use reverse=1) for
+    the sweep/marquee to travel the way you expect.
       reverse  '1' to flip the sweep direction across the panel order.
       lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
       waves    replay the whole sweep this many times (default 1).
@@ -633,17 +641,16 @@ def effect():
     # tunes it; a numeric `stagger` overrides with a fixed value in ms.
     factor = _float_arg('factor', 1.0, lo=0.05, hi=5.0)
     full_go = scroll_duration_ms(data)
-    tile_stagger = MATRIX_WIDTH * SCROLL_INTERVAL_MS  # one panel width of scroll (960 ms)
     raw_stagger = request.args.get('stagger', 'auto').strip().lower()
     if raw_stagger.lstrip('-').isdigit():
         stagger = max(0, min(5000, int(raw_stagger)))
         stagger_mode = 'fixed'
     elif raw_stagger == 'tile':
-        # Continuous "long display": offset each panel by exactly one panel width so the
-        # content tiles seamlessly across the wall -- what scrolls off one node enters the
-        # next, turning the panels into one long marquee. factor > 1 compensates for a
-        # physical gap/bezel between panels (a touch more than 8 px of travel per panel).
-        stagger = max(1, min(5000, round(tile_stagger * factor)))
+        # Continuous "long display": offset each panel by ~one panel width so the content
+        # tiles seamlessly across the wall -- what scrolls off one node enters the next,
+        # turning the panels into one long marquee. factor < 1 tightens the overlap; > 1
+        # opens it up to compensate for a physical gap/bezel between panels.
+        stagger = max(1, min(5000, round(TILE_STAGGER_MS * factor)))
         stagger_mode = 'tile'
     else:  # 'auto' (default): one full display of the content per panel (a discrete hop)
         stagger = max(1, min(5000, round(full_go * factor)))
