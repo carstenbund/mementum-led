@@ -553,6 +553,47 @@
             runEffect();
         }
 
+        // ---- Quick-access effect bar (top of page) ----
+        // Self-contained presets so each button is one click, independent of the advanced
+        // form below. Direction is the server default (reverse on = right->left). All of
+        // these emit only v1.3 /play seq/at/data under the hood.
+        var QUICK_EFFECTS = {
+            star:   { data: '*',            stagger: 'auto', factor: 1,   label: 'Stern' },
+            comet:  { data: '@cyan*',       stagger: 'auto', factor: 0.5, label: 'Komet' },
+            stream: { data: '@yellow* * *', stagger: 'tile', factor: 1,   label: 'Strom' },
+            arrow:  { data: '@green>>>',    stagger: 'auto', factor: 0.6, label: 'Pfeil' },
+            unison: { data: '@pink*',       stagger: 0,      factor: 1,   label: 'Synchron' }
+        };
+
+        function quickStatus(msg) {
+            var s = document.getElementById('quickStatus');
+            if (s) s.textContent = msg;
+        }
+
+        function fireEffect(params, label) {
+            var p = new URLSearchParams();
+            Object.keys(params).forEach(function(k) { p.set(k, params[k]); });
+            quickStatus('▶ ' + label + ' …');
+            fetch('/effect?' + p.toString()).then(function(r) {
+                return r.ok ? r.json() : Promise.reject();
+            }).then(function(d) {
+                quickStatus('▶ ' + label + ' · ' + d.panels + ' Panels · ~' +
+                    Math.round(d.duration_ms / 1000) + ' s');
+            }).catch(function() { quickStatus('Fehler / keine aktiven Panels'); });
+        }
+
+        function quickEffect(name) {
+            var e = QUICK_EFFECTS[name];
+            if (!e) return;
+            fireEffect({ data: e.data, stagger: e.stagger, factor: e.factor }, e.label);
+        }
+
+        // Lauftext uses whatever is currently in the main text box.
+        function quickMarquee() {
+            var t = (document.getElementById('Text').value || '').trim() || 'mementum';
+            fireEffect({ data: t, stagger: 'tile', factor: 1, lead: 800, gap: 0 }, 'Lauftext „' + t + '"');
+        }
+
         window.onload = function() {
             fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000)).catch(function(){});
             fetchSentStrings();
@@ -566,6 +607,18 @@
     </script>
     <div class="header">
         <h1>mementum LED</h1>
+    </div>
+    <div class="container" id="quickEffectsBar">
+        <h3 style="margin-top: 0;">Schnell-Effekte</h3>
+        <div class="frag-row" style="flex-wrap: wrap;">
+            <button onclick="quickEffect('star')">&#9733; Stern</button>
+            <button onclick="quickEffect('comet')">&#9732; Komet</button>
+            <button onclick="quickEffect('stream')">&#10022; Strom</button>
+            <button onclick="quickEffect('arrow')">&#187; Pfeil</button>
+            <button onclick="quickMarquee()">&#10231; Lauftext</button>
+            <button onclick="quickEffect('unison')">&#9638; Synchron</button>
+        </div>
+        <div id="quickStatus" class="muted" style="margin-top: 4px;"></div>
     </div>
     <div class="container">
         <div class="input-container">
