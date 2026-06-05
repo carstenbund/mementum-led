@@ -481,12 +481,13 @@ def add_effect_preset():
         return jsonify({"status": "error", "message": "Empty name."}), 400
     if cfg is None:
         return jsonify({"status": "error", "message": "Invalid config JSON."}), 400
+    active = 0 if request.args.get('active') in ('0', 'false', 'False') else 1
     with db_lock, db_connect() as conn:
         nextpos = conn.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM effect_presets").fetchone()[0]
         conn.execute(
-            "INSERT INTO effect_presets (name, config, active, position) VALUES (?,?,1,?)",
-            (name, json.dumps(cfg), nextpos))
+            "INSERT INTO effect_presets (name, config, active, position) VALUES (?,?,?,?)",
+            (name, json.dumps(cfg), active, nextpos))
     log.emit("PRESET    add %r" % name)
     return jsonify(db_effect_presets())
 
