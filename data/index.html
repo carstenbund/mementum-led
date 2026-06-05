@@ -525,6 +525,7 @@
             if (order) p.set('order', order);
             // Always send the explicit state so unticking truly disables the (default-on) reverse.
             p.set('reverse', document.getElementById('effectReverse').checked ? '1' : '0');
+            saveScene();   // remember this scene (incl. direction) for the quick buttons & reloads
             effectStatus('Starte Effekt…');
             fetch('/effect?' + p.toString()).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
@@ -554,16 +555,56 @@
         }
 
         // ---- Quick-access effect bar (top of page) ----
-        // Self-contained presets so each button is one click, independent of the advanced
-        // form below. Direction is the server default (reverse on = right->left). All of
-        // these emit only v1.3 /play seq/at/data under the hood.
+        // Each button keeps its own DEFAULTS (content + stagger + factor) but takes its
+        // DIRECTION (order + reverse) from the effects section below, which is persisted in
+        // localStorage. So you set the travel direction once and every quick button stays in
+        // sync. Note: panels scroll left-ward (right->left), so directional glyphs point
+        // LEFT ('<') -- the way they actually move. All emit only v1.3 /play seq/at/data.
         var QUICK_EFFECTS = {
             star:   { data: '*',            stagger: 'auto', factor: 1,   label: 'Stern' },
             comet:  { data: '@cyan*',       stagger: 'auto', factor: 0.5, label: 'Komet' },
             stream: { data: '@yellow* * *', stagger: 'tile', factor: 1,   label: 'Strom' },
-            arrow:  { data: '@green>>>',    stagger: 'auto', factor: 0.6, label: 'Pfeil' },
+            arrow:  { data: '@green<<<',    stagger: 'auto', factor: 0.6, label: 'Pfeil' },
             unison: { data: '@pink*',       stagger: 0,      factor: 1,   label: 'Synchron' }
         };
+
+        // The shared "scene": persisted effect settings. Quick buttons read direction from
+        // it; the advanced form both reads and writes it.
+        var SCENE_FIELDS = ['effectData', 'effectStagger', 'effectFactor', 'effectWaves',
+                            'effectLead', 'effectGap', 'effectOrder', 'effectReverse'];
+
+        function saveScene() {
+            var s = {};
+            SCENE_FIELDS.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) s[id] = (el.type === 'checkbox') ? el.checked : el.value;
+            });
+            try { localStorage.setItem('mementumScene', JSON.stringify(s)); } catch (e) {}
+        }
+
+        function restoreScene() {
+            var s;
+            try { s = JSON.parse(localStorage.getItem('mementumScene') || '{}'); } catch (e) { s = {}; }
+            SCENE_FIELDS.forEach(function(id) {
+                if (!(id in s)) return;
+                var el = document.getElementById(id);
+                if (!el) return;
+                if (el.type === 'checkbox') el.checked = s[id]; else el.value = s[id];
+            });
+            SCENE_FIELDS.forEach(function(id) {            // persist on any change
+                var el = document.getElementById(id);
+                if (el) el.addEventListener('change', saveScene);
+            });
+        }
+
+        // Direction (order + reverse) is shared by quick buttons and the advanced form.
+        function sceneDirection() {
+            var d = {};
+            var order = (document.getElementById('effectOrder').value || '').trim();
+            if (order) d.order = order;
+            d.reverse = document.getElementById('effectReverse').checked ? '1' : '0';
+            return d;
+        }
 
         function quickStatus(msg) {
             var s = document.getElementById('quickStatus');
@@ -572,7 +613,10 @@
 
         function fireEffect(params, label) {
             var p = new URLSearchParams();
-            Object.keys(params).forEach(function(k) { p.set(k, params[k]); });
+            // Button defaults, then overlay the shared direction so all buttons travel the
+            // same way as the configured scene.
+            var all = Object.assign({}, params, sceneDirection());
+            Object.keys(all).forEach(function(k) { p.set(k, all[k]); });
             quickStatus('▶ ' + label + ' …');
             fetch('/effect?' + p.toString()).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
@@ -596,6 +640,7 @@
 
         window.onload = function() {
             fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000)).catch(function(){});
+            restoreScene();
             fetchSentStrings();
             fetchPreMadeStrings();
             fetchFragments();
@@ -742,8 +787,10 @@
                 <button onclick="runEffect()">Effekt starten</button>
             </div>
             <div class="muted" style="margin-bottom: 6px;">
-                Panels laufen rechts&rarr;links, daher ist &bdquo;Rückwärts&ldquo;
-                voreingestellt &ndash; natürliche Reihenfolge (0,1,2,3,4) bzw. leer lassen.
+                id&nbsp;0 = links. Panels laufen nach links, also startet rechts zuerst:
+                Reihenfolge natürlich (0,1,2,3,4) bzw. leer lassen und &bdquo;Rückwärts&ldquo; an
+                &ndash; <b>nicht</b> manuell 4,3,2,1,0 eintragen. Die Schnell-Effekte oben folgen
+                dieser Richtung.
             </div>
             <div class="frag-row" style="align-items: center;">
                 <span class="muted">Schnell:</span>
