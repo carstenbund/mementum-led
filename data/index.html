@@ -657,10 +657,11 @@
             var name = (document.getElementById('presetName').value || '').trim();
             if (!name) { effectStatus('Bitte Preset-Namen eingeben.'); return; }
             var cfg = encodeURIComponent(JSON.stringify(formEffectConfig()));
+            var active = document.getElementById('presetActive').checked ? 1 : 0;
             var existing = effectPresets.filter(function(p) { return p.name === name; })[0];
             var url = existing
-                ? '/updateEffectPreset?id=' + existing.id + '&config=' + cfg
-                : '/addEffectPreset?name=' + encodeURIComponent(name) + '&config=' + cfg;
+                ? '/updateEffectPreset?id=' + existing.id + '&config=' + cfg + '&active=' + active
+                : '/addEffectPreset?name=' + encodeURIComponent(name) + '&config=' + cfg + '&active=' + active;
             fetch(url).then(applyPresetResult).then(function(list) {
                 afterPresetChange(list);
                 if (list) effectStatus('Preset „' + name + '" gespeichert.');
@@ -785,10 +786,10 @@
 
     <div class="container" id="effectsSection">
         <h3 id="effectsHeader" style="cursor: pointer; user-select: none;" onclick="toggleEffects()">
-            <span id="effectsCaret">&#9656;</span> Effekte &amp; Diagnose
+            <span id="effectsCaret">&#9662;</span> Effekte &amp; Diagnose
             <span class="muted">(zeitversetzte Sequenzen über die Panels)</span>
         </h3>
-        <div id="effectsBody" style="display: none;">
+        <div id="effectsBody" style="display: block;">
             <!-- Diagnose: jedes Panel zeigt seine eigene ID -->
             <div class="frag-row" style="align-items: center;">
                 <button onclick="runIdentify()">Panels nummerieren</button>
@@ -839,6 +840,7 @@
                     <span class="muted">(aktive erscheinen oben unter „Effekte")</span></h4>
                 <div class="frag-row" style="align-items: center;">
                     <input type="text" id="presetName" maxlength="40" placeholder="Preset-Name…">
+                    <label title="oben als Effekt-Button anzeigen"><input type="checkbox" id="presetActive" checked> aktiv</label>
                     <button onclick="savePresetFromForm()">Aktuelle Einstellung speichern</button>
                 </div>
                 <div id="presetList" class="fragment-list">
