@@ -622,9 +622,12 @@ def effect():
     `order` empty / natural with reverse on, or list it right-to-left with reverse=0.
       reverse  flip the sweep direction across the panel order. DEFAULT ON, because the
                panels scroll right->left; pass reverse=0 to disable.
-      lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
+      lead     ms before each (re)start -- the delay from trigger to first pixel, and the
+               blank between repeated waves (default DISPLAY_LEAD_MS, 2000). It exists so
+               every panel receives the /play before the start instant; for a handful of
+               local panels a few hundred ms is plenty, so lower it for a snappier restart.
       waves    replay the whole sweep this many times (default 1).
-      gap      ms of darkness between waves (default = stagger).
+      gap      extra ms of darkness between waves, on top of lead (default 0).
       order    explicit comma-separated client IDs giving the sweep order
                (default: ascending client id). Use this to match your physical layout.
 
@@ -660,7 +663,7 @@ def effect():
 
     lead = _int_arg('lead', DISPLAY_LEAD_MS, lo=0, hi=10000)
     waves = _int_arg('waves', 1, lo=1, hi=EFFECT_MAX_WAVES)
-    gap = _int_arg('gap', stagger, lo=0, hi=10000)
+    gap = _int_arg('gap', 0, lo=0, hi=10000)
     # Default ON: panels scroll right->left, so reversing the natural id order (0,1,2,..)
     # makes the sweep/marquee travel the way you read the wall. Pass reverse=0 to disable.
     reverse = request.args.get('reverse', '1') not in ('0', '', 'false', 'False')
