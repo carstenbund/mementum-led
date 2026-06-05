@@ -75,6 +75,19 @@ BROADCAST_WORKERS = 64
 PREMADE_STRINGS = ["Hello World", "Temperature: 25C", "Status: OK",
                    "Error: None", "Action: Start"]
 
+# Seed effect presets on first run. Each is a named, fully self-contained /effect config
+# (incl. direction). data='' means "use the live text box" (a marquee of the current text).
+# Direction baked in: empty order + reverse=1 = natural id order reversed = right-most first
+# = correct left-ward flow when id 0 is the left-most panel.
+EFFECT_PRESET_SEEDS = [
+    ("Stern",    {"data": "*",            "stagger": "auto", "factor": 1,   "reverse": 1}),
+    ("Komet",    {"data": "@cyan*",       "stagger": "auto", "factor": 0.5, "reverse": 1}),
+    ("Strom",    {"data": "@yellow* * *", "stagger": "tile", "factor": 1,   "reverse": 1}),
+    ("Pfeil",    {"data": "@green<<<",    "stagger": "auto", "factor": 0.6, "reverse": 1}),
+    ("Lauftext", {"data": "", "stagger": "tile", "factor": 1, "lead": 800, "gap": 0, "reverse": 1}),
+    ("Synchron", {"data": "@pink*",       "stagger": 0,      "factor": 1,   "reverse": 1}),
+]
+
 MAX_TEXT_LENGTH = 100         # matches firmware MAX_TEXT_LENGTH (ws_wifi.h)
 
 # @color prefixes recognized by the firmware (ws_flow.h colorMap)
@@ -107,6 +120,17 @@ def db_init():
         conn.execute("""CREATE TABLE IF NOT EXISTS config (
                             key   TEXT PRIMARY KEY,
                             value INTEGER NOT NULL)""")
+        # Named effect presets (full /effect config as JSON + an 'active' show-as-button flag).
+        conn.execute("""CREATE TABLE IF NOT EXISTS effect_presets (
+                            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name     TEXT NOT NULL,
+                            config   TEXT NOT NULL,
+                            active   INTEGER NOT NULL DEFAULT 1,
+                            position INTEGER NOT NULL DEFAULT 0)""")
+        if conn.execute("SELECT COUNT(*) FROM effect_presets").fetchone()[0] == 0:
+            conn.executemany(
+                "INSERT INTO effect_presets (name, config, active, position) VALUES (?,?,1,?)",
+                [(n, json.dumps(c), i) for i, (n, c) in enumerate(EFFECT_PRESET_SEEDS)])
 
 
 def db_fragments():
@@ -126,6 +150,21 @@ def db_set_config(key, value):
     with db_lock, db_connect() as conn:
         conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                      (key, value))
+
+
+def db_effect_presets():
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT id, name, config, active FROM effect_presets ORDER BY position, id").fetchall()
+    out = []
+    for r in rows:
+        try:
+            cfg = json.loads(r["config"])
+        except (ValueError, TypeError):
+            cfg = {}
+        out.append({"id": r["id"], "name": r["name"], "config": cfg,
+                    "active": bool(r["active"])})
+    return out
 
 
 db_init()
@@ -413,6 +452,87 @@ def delete_fragment():
         conn.execute("DELETE FROM fragments WHERE id = ?", (fid,))
     log.emit("FRAGMENT  delete id=%d" % fid)
     return jsonify(db_fragments())
+
+
+# ---- Effect-preset store (named full /effect configs, like the fragment library) ----
+def _clean_preset_name():
+    return (request.args.get('name') or '').strip()[:40]
+
+
+def _parse_preset_config():
+    """Return the config dict from ?config=<json>, or None if missing/invalid."""
+    try:
+        cfg = json.loads(request.args.get('config', ''))
+        return cfg if isinstance(cfg, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+@app.route("/effectPresets")
+def list_effect_presets():
+    return jsonify(db_effect_presets())
+
+
+@app.route("/addEffectPreset")
+def add_effect_preset():
+    name = _clean_preset_name()
+    cfg = _parse_preset_config()
+    if not name:
+        return jsonify({"status": "error", "message": "Empty name."}), 400
+    if cfg is None:
+        return jsonify({"status": "error", "message": "Invalid config JSON."}), 400
+    with db_lock, db_connect() as conn:
+        nextpos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM effect_presets").fetchone()[0]
+        conn.execute(
+            "INSERT INTO effect_presets (name, config, active, position) VALUES (?,?,1,?)",
+            (name, json.dumps(cfg), nextpos))
+    log.emit("PRESET    add %r" % name)
+    return jsonify(db_effect_presets())
+
+
+@app.route("/updateEffectPreset")
+def update_effect_preset():
+    """Patch any of name / config / active on a preset (only the params supplied)."""
+    if not request.args.get('id', '').isdigit():
+        return jsonify({"status": "error", "message": "Missing/invalid id."}), 400
+    pid = int(request.args['id'])
+    sets, vals = [], []
+    if 'name' in request.args:
+        name = _clean_preset_name()
+        if not name:
+            return jsonify({"status": "error", "message": "Empty name."}), 400
+        sets.append("name = ?"); vals.append(name)
+    if 'config' in request.args:
+        cfg = _parse_preset_config()
+        if cfg is None:
+            return jsonify({"status": "error", "message": "Invalid config JSON."}), 400
+        sets.append("config = ?"); vals.append(json.dumps(cfg))
+    if 'active' in request.args:
+        active = 1 if request.args.get('active') in ('1', 'true', 'True') else 0
+        sets.append("active = ?"); vals.append(active)
+    if not sets:
+        return jsonify({"status": "error", "message": "Nothing to update."}), 400
+    vals.append(pid)
+    # `sets` holds only fixed column fragments; values are parameterised.
+    with db_lock, db_connect() as conn:
+        changed = conn.execute(
+            "UPDATE effect_presets SET %s WHERE id = ?" % ", ".join(sets), vals).rowcount
+    if not changed:
+        return jsonify({"status": "error", "message": "No such preset."}), 404
+    log.emit("PRESET    update id=%d" % pid)
+    return jsonify(db_effect_presets())
+
+
+@app.route("/deleteEffectPreset")
+def delete_effect_preset():
+    if not request.args.get('id', '').isdigit():
+        return jsonify({"status": "error", "message": "Missing/invalid id."}), 400
+    pid = int(request.args['id'])
+    with db_lock, db_connect() as conn:
+        conn.execute("DELETE FROM effect_presets WHERE id = ?", (pid,))
+    log.emit("PRESET    delete id=%d" % pid)
+    return jsonify(db_effect_presets())
 
 
 @app.route("/SendData")

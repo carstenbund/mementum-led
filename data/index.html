@@ -525,7 +525,6 @@
             if (order) p.set('order', order);
             // Always send the explicit state so unticking truly disables the (default-on) reverse.
             p.set('reverse', document.getElementById('effectReverse').checked ? '1' : '0');
-            saveScene();   // remember this scene (incl. direction) for the quick buttons & reloads
             effectStatus('Starte Effekt…');
             fetch('/effect?' + p.toString()).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
@@ -537,113 +536,160 @@
             }).catch(function() { effectStatus('Fehler / keine Clients'); });
         }
 
-        // Quick presets: set the fields and fire immediately.
-        function effectPreset(kind) {
-            var dataEl = document.getElementById('effectData');
-            var stagEl = document.getElementById('effectStagger');
-            var facEl = document.getElementById('effectFactor');
-            var wavEl = document.getElementById('effectWaves');
-            wavEl.value = 1;
-            // 'Lauftext': one continuous marquee across the wall, using whatever text is in
-            // the box; keep the user's text rather than overwriting it.
-            if (kind === 'marquee') { stagEl.value = 'tile'; facEl.value = 1; runEffect(); return; }
-            stagEl.value = 'auto';
-            if (kind === 'star')   { dataEl.value = '*';      facEl.value = 1; }
-            if (kind === 'stream') { dataEl.value = '* * *';  facEl.value = 1; }
-            if (kind === 'comet')  { dataEl.value = '@cyan*'; facEl.value = 0.5; }
-            runEffect();
-        }
+        // ---- Effect presets (server-stored & editable, like the Textbausteine library) ----
+        // A preset is a named, fully self-contained /effect config (content + stagger +
+        // factor + timing + direction). The 'active' ones render as quick buttons under
+        // Vorgaben. Manage them in the table in the effects section.
+        var effectPresets = [];
 
-        // ---- Quick-access effect bar (top of page) ----
-        // Each button keeps its own DEFAULTS (content + stagger + factor) but takes its
-        // DIRECTION (order + reverse) from the effects section below, which is persisted in
-        // localStorage. So you set the travel direction once and every quick button stays in
-        // sync. Note: panels scroll left-ward (right->left), so directional glyphs point
-        // LEFT ('<') -- the way they actually move. All emit only v1.3 /play seq/at/data.
-        var QUICK_EFFECTS = {
-            star:   { data: '*',            stagger: 'auto', factor: 1,   label: 'Stern' },
-            comet:  { data: '@cyan*',       stagger: 'auto', factor: 0.5, label: 'Komet' },
-            stream: { data: '@yellow* * *', stagger: 'tile', factor: 1,   label: 'Strom' },
-            arrow:  { data: '@green<<<',    stagger: 'auto', factor: 0.6, label: 'Pfeil' },
-            unison: { data: '@pink*',       stagger: 0,      factor: 1,   label: 'Synchron' }
-        };
-
-        // The shared "scene": persisted effect settings. Quick buttons read direction from
-        // it; the advanced form both reads and writes it.
-        var SCENE_FIELDS = ['effectData', 'effectStagger', 'effectFactor', 'effectWaves',
-                            'effectLead', 'effectGap', 'effectOrder', 'effectReverse'];
-
-        function saveScene() {
-            var s = {};
-            SCENE_FIELDS.forEach(function(id) {
-                var el = document.getElementById(id);
-                if (el) s[id] = (el.type === 'checkbox') ? el.checked : el.value;
-            });
-            try { localStorage.setItem('mementumScene', JSON.stringify(s)); } catch (e) {}
-        }
-
-        function restoreScene() {
-            var s;
-            try { s = JSON.parse(localStorage.getItem('mementumScene') || '{}'); } catch (e) { s = {}; }
-            SCENE_FIELDS.forEach(function(id) {
-                if (!(id in s)) return;
-                var el = document.getElementById(id);
-                if (!el) return;
-                if (el.type === 'checkbox') el.checked = s[id]; else el.value = s[id];
-            });
-            SCENE_FIELDS.forEach(function(id) {            // persist on any change
-                var el = document.getElementById(id);
-                if (el) el.addEventListener('change', saveScene);
+        function fetchEffectPresets() {
+            fetch('/effectPresets').then(function(r) {
+                if (!r.ok) throw new Error('no presets');
+                return r.json();
+            }).then(function(list) {
+                effectPresets = list;
+                renderEffectPresetButtons();
+                renderEffectPresetTable();
+            }).catch(function() {
+                var s = document.getElementById('effectPresetSection');
+                if (s) s.style.display = 'none';   // endpoint absent (e.g. ESP32 server)
             });
         }
 
-        // Direction (order + reverse) is shared by quick buttons and the advanced form.
-        function sceneDirection() {
-            var d = {};
-            var order = (document.getElementById('effectOrder').value || '').trim();
-            if (order) d.order = order;
-            d.reverse = document.getElementById('effectReverse').checked ? '1' : '0';
-            return d;
+        // Gather the current effect-form values into a config object.
+        function formEffectConfig() {
+            var cfg = {};
+            var data = document.getElementById('effectData').value;
+            if (data) cfg.data = data;
+            var stagger = document.getElementById('effectStagger').value.trim();
+            if (stagger) cfg.stagger = stagger;
+            var factor = document.getElementById('effectFactor').value.trim();
+            if (factor) cfg.factor = factor;
+            var waves = parseInt(document.getElementById('effectWaves').value, 10);
+            if (!isNaN(waves) && waves > 1) cfg.waves = waves;
+            var lead = parseInt(document.getElementById('effectLead').value, 10);
+            if (!isNaN(lead)) cfg.lead = lead;
+            var gap = parseInt(document.getElementById('effectGap').value, 10);
+            if (!isNaN(gap)) cfg.gap = gap;
+            var order = document.getElementById('effectOrder').value.trim();
+            if (order) cfg.order = order;
+            cfg.reverse = document.getElementById('effectReverse').checked ? 1 : 0;
+            return cfg;
         }
 
-        function quickStatus(msg) {
-            var s = document.getElementById('quickStatus');
-            if (s) s.textContent = msg;
+        function presetById(id) {
+            return effectPresets.filter(function(p) { return p.id === id; })[0];
         }
 
-        function fireEffect(params, label) {
+        // Load a stored preset's config into the form for tweaking.
+        function loadPresetIntoForm(id) {
+            var pre = presetById(id); if (!pre) return;
+            var c = pre.config || {};
+            document.getElementById('effectData').value    = (c.data !== undefined) ? c.data : '';
+            document.getElementById('effectStagger').value = (c.stagger !== undefined) ? c.stagger : 'auto';
+            document.getElementById('effectFactor').value  = (c.factor !== undefined) ? c.factor : 1;
+            document.getElementById('effectWaves').value   = (c.waves !== undefined) ? c.waves : 1;
+            document.getElementById('effectLead').value    = (c.lead !== undefined) ? c.lead : 800;
+            document.getElementById('effectGap').value     = (c.gap !== undefined) ? c.gap : 0;
+            document.getElementById('effectOrder').value   = (c.order !== undefined) ? c.order : '';
+            document.getElementById('effectReverse').checked = !!c.reverse;
+            document.getElementById('presetName').value = pre.name;
+            effectStatus('Preset „' + pre.name + '" geladen.');
+        }
+
+        // Fire a preset directly. Empty data => use the live text box (a marquee of it).
+        function firePreset(id) {
+            var pre = presetById(id); if (!pre) return;
+            var c = Object.assign({}, pre.config || {});
+            if (!c.data) c.data = (document.getElementById('Text').value || '').trim() || 'mementum';
             var p = new URLSearchParams();
-            // Button defaults, then overlay the shared direction so all buttons travel the
-            // same way as the configured scene.
-            var all = Object.assign({}, params, sceneDirection());
-            Object.keys(all).forEach(function(k) { p.set(k, all[k]); });
-            quickStatus('▶ ' + label + ' …');
+            Object.keys(c).forEach(function(k) { p.set(k, c[k]); });
+            effectStatus('▶ ' + pre.name + ' …');
             fetch('/effect?' + p.toString()).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
             }).then(function(d) {
-                quickStatus('▶ ' + label + ' · ' + d.panels + ' Panels · ~' +
+                effectStatus('▶ ' + pre.name + ' · ' + d.panels + ' Panels · ~' +
                     Math.round(d.duration_ms / 1000) + ' s');
-            }).catch(function() { quickStatus('Fehler / keine aktiven Panels'); });
+            }).catch(function() { effectStatus('Fehler / keine aktiven Panels'); });
         }
 
-        function quickEffect(name) {
-            var e = QUICK_EFFECTS[name];
-            if (!e) return;
-            fireEffect({ data: e.data, stagger: e.stagger, factor: e.factor }, e.label);
+        // Active presets become quick buttons under Vorgaben.
+        function renderEffectPresetButtons() {
+            var box = document.getElementById('effectPresetButtons');
+            if (!box) return;
+            box.innerHTML = '';
+            effectPresets.filter(function(p) { return p.active; }).forEach(function(p) {
+                var b = document.createElement('button');
+                b.textContent = p.name;
+                b.onclick = function() { firePreset(p.id); };
+                box.appendChild(b);
+            });
         }
 
-        // Lauftext uses whatever is currently in the main text box.
-        function quickMarquee() {
-            var t = (document.getElementById('Text').value || '').trim() || 'mementum';
-            fireEffect({ data: t, stagger: 'tile', factor: 1, lead: 800, gap: 0 }, 'Lauftext „' + t + '"');
+        // Management table (active toggle + rename + load + delete), like the fragment mask.
+        function renderEffectPresetTable() {
+            var box = document.getElementById('presetList');
+            if (!box) return;
+            box.innerHTML = '';
+            effectPresets.forEach(function(p) {
+                var row = document.createElement('div');
+                row.className = 'frag-row';
+                row.innerHTML =
+                    '<label title="im Schnellzugriff zeigen"><input type="checkbox" ' +
+                        (p.active ? 'checked ' : '') +
+                        'onchange="togglePreset(' + p.id + ', this.checked)"></label>' +
+                    '<input type="text" maxlength="40" id="presetName' + p.id + '">' +
+                    '<button onclick="loadPresetIntoForm(' + p.id + ')" title="ins Formular laden">Laden</button>' +
+                    '<button onclick="renamePreset(' + p.id + ')">Name</button>' +
+                    '<button onclick="deletePreset(' + p.id + ')">Löschen</button>';
+                box.appendChild(row);
+                document.getElementById('presetName' + p.id).value = p.name;
+            });
+        }
+
+        function applyPresetResult(r) { return r.ok ? r.json() : null; }
+        function afterPresetChange(list) {
+            if (list) { effectPresets = list; renderEffectPresetButtons(); renderEffectPresetTable(); }
+        }
+
+        // Save the current form as a preset. Upsert by name: update config if the name exists.
+        function savePresetFromForm() {
+            var name = (document.getElementById('presetName').value || '').trim();
+            if (!name) { effectStatus('Bitte Preset-Namen eingeben.'); return; }
+            var cfg = encodeURIComponent(JSON.stringify(formEffectConfig()));
+            var existing = effectPresets.filter(function(p) { return p.name === name; })[0];
+            var url = existing
+                ? '/updateEffectPreset?id=' + existing.id + '&config=' + cfg
+                : '/addEffectPreset?name=' + encodeURIComponent(name) + '&config=' + cfg;
+            fetch(url).then(applyPresetResult).then(function(list) {
+                afterPresetChange(list);
+                if (list) effectStatus('Preset „' + name + '" gespeichert.');
+            });
+        }
+
+        function togglePreset(id, active) {
+            fetch('/updateEffectPreset?id=' + id + '&active=' + (active ? 1 : 0))
+                .then(applyPresetResult).then(afterPresetChange);
+        }
+
+        function renamePreset(id) {
+            var name = (document.getElementById('presetName' + id).value || '').trim();
+            if (!name) return;
+            fetch('/updateEffectPreset?id=' + id + '&name=' + encodeURIComponent(name))
+                .then(applyPresetResult).then(afterPresetChange);
+        }
+
+        function deletePreset(id) {
+            if (!confirm('Preset löschen?')) return;
+            fetch('/deleteEffectPreset?id=' + id).then(applyPresetResult).then(afterPresetChange);
         }
 
         window.onload = function() {
             fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000)).catch(function(){});
-            restoreScene();
             fetchSentStrings();
             fetchPreMadeStrings();
             fetchFragments();
+            fetchEffectPresets();
             fetchConfig();
             fetchClients();
             statusTimer = setInterval(fetchClients, 2000);
@@ -652,18 +698,6 @@
     </script>
     <div class="header">
         <h1>mementum LED</h1>
-    </div>
-    <div class="container" id="quickEffectsBar">
-        <h3 style="margin-top: 0;">Schnell-Effekte</h3>
-        <div class="frag-row" style="flex-wrap: wrap;">
-            <button onclick="quickEffect('star')">&#9733; Stern</button>
-            <button onclick="quickEffect('comet')">&#9732; Komet</button>
-            <button onclick="quickEffect('stream')">&#10022; Strom</button>
-            <button onclick="quickEffect('arrow')">&#187; Pfeil</button>
-            <button onclick="quickMarquee()">&#10231; Lauftext</button>
-            <button onclick="quickEffect('unison')">&#9638; Synchron</button>
-        </div>
-        <div id="quickStatus" class="muted" style="margin-top: 4px;"></div>
     </div>
     <div class="container">
         <div class="input-container">
@@ -697,6 +731,12 @@
             <h3>Vorgaben:</h3>
             <div id="preMadeList" class="pre-made-buttons">
                 <!-- Pre-made strings buttons will be populated here -->
+            </div>
+        </div>
+        <div class="pre-made-container">
+            <h3>Effekte:</h3>
+            <div id="effectPresetButtons" class="pre-made-buttons">
+                <!-- Active effect presets render here as quick buttons -->
             </div>
         </div>
         <div class="button-container">
@@ -789,15 +829,21 @@
             <div class="muted" style="margin-bottom: 6px;">
                 id&nbsp;0 = links. Panels laufen nach links, also startet rechts zuerst:
                 Reihenfolge natürlich (0,1,2,3,4) bzw. leer lassen und &bdquo;Rückwärts&ldquo; an
-                &ndash; <b>nicht</b> manuell 4,3,2,1,0 eintragen. Die Schnell-Effekte oben folgen
-                dieser Richtung.
+                &ndash; <b>nicht</b> manuell 4,3,2,1,0 eintragen.
             </div>
-            <div class="frag-row" style="align-items: center;">
-                <span class="muted">Schnell:</span>
-                <button onclick="effectPreset('star')">&#9733; Stern</button>
-                <button onclick="effectPreset('stream')">&#10022; Strom</button>
-                <button onclick="effectPreset('comet')">&#9732; Komet</button>
-                <button onclick="effectPreset('marquee')" title="Text aus dem Feld als durchgehender Lauftext über alle Panels">&#10231; Lauftext</button>
+
+            <!-- Presets: die aktuelle Einstellung benennen und speichern. Aktive Presets
+                 erscheinen oben unter „Effekte" als Schnellzugriff-Buttons. -->
+            <div id="effectPresetSection" style="margin-top: 12px;">
+                <h4 style="margin: 6px 0;">Presets
+                    <span class="muted">(aktive erscheinen oben unter „Effekte")</span></h4>
+                <div class="frag-row" style="align-items: center;">
+                    <input type="text" id="presetName" maxlength="40" placeholder="Preset-Name…">
+                    <button onclick="savePresetFromForm()">Aktuelle Einstellung speichern</button>
+                </div>
+                <div id="presetList" class="fragment-list">
+                    <!-- Preset rows: aktiv-Haken, Name, Laden, Name speichern, Löschen -->
+                </div>
             </div>
             <div id="effectStatus" class="muted" style="margin-top: 6px;"></div>
         </div>
