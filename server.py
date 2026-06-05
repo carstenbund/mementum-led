@@ -557,6 +557,20 @@ def _int_arg(name, default, lo=None, hi=None):
     return value
 
 
+def _float_arg(name, default, lo=None, hi=None):
+    """Parse a float query arg, falling back to `default`, clamped to [lo, hi]."""
+    raw = request.args.get(name, '')
+    try:
+        value = float(raw)
+    except ValueError:
+        value = default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
 def run_effect(ordered, data, stagger, lead, waves, gap, wave_len):
     """Fire one or more staggered sweeps across the panels (runs in its own thread).
 
@@ -586,8 +600,12 @@ def effect():
     Query params (all optional):
       data     glyph/text to sweep (default '*'). '* * *' = a stream of stars;
                '@cyan*' = a coloured star; '*..' = a star with a little tail.
-      stagger  ms between adjacent panels (default 960 = one 8-px panel crossing).
-               smaller -> continuous glide; larger -> a distinct hop one panel then the next.
+      stagger  delay between adjacent panels. Default 'auto' = one full display of the
+               content on a node ('a full go'), derived from scroll_duration_ms() which
+               sums each letter's real width via the getCharWidth hint -- so words with
+               narrow letters (i, l, !, .) stagger correctly. Pass a number for fixed ms.
+      factor   scales the auto stagger (default 1.0): 1 = clean hop one panel then the
+               next; <1 overlaps into a continuous glide; >1 leaves a gap between panels.
       reverse  '1' to flip the sweep direction across the panel order.
       lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
       waves    replay the whole sweep this many times (default 1).
@@ -595,12 +613,29 @@ def effect():
       order    explicit comma-separated client IDs giving the sweep order
                (default: ascending client id). Use this to match your physical layout.
 
-    Example: http://<server>/effect?data=@cyan*&stagger=700&waves=3
+    Examples: /effect                 -> one '*' hopping panel to panel (auto stagger)
+              /effect?data=Hallo      -> the word travels the wall, timed to its letters
+              /effect?factor=0.5      -> overlap into a continuous glide
+              /effect?stagger=700&waves=3
     """
     global effect_until
 
     data = request.args.get('data', '*')[:MAX_TEXT_LENGTH]
-    stagger = _int_arg('stagger', MATRIX_WIDTH * SCROLL_INTERVAL_MS, lo=0, hi=5000)
+
+    # Universal stagger: by default, delay each panel by one full display of the content
+    # ('a full go'). scroll_duration_ms() already accounts for variable letter widths via
+    # the getCharWidth hint, so this is the content-aware "universal stagger". `factor`
+    # tunes it; a numeric `stagger` overrides with a fixed value in ms.
+    factor = _float_arg('factor', 1.0, lo=0.05, hi=5.0)
+    full_go = scroll_duration_ms(data)
+    raw_stagger = request.args.get('stagger', 'auto')
+    if raw_stagger.lstrip('-').isdigit():
+        stagger = max(0, min(5000, int(raw_stagger)))
+        stagger_mode = 'fixed'
+    else:  # 'auto' (default) or any non-numeric value
+        stagger = max(1, min(5000, round(full_go * factor)))
+        stagger_mode = 'auto'
+
     lead = _int_arg('lead', DISPLAY_LEAD_MS, lo=0, hi=10000)
     waves = _int_arg('waves', 1, lo=1, hi=EFFECT_MAX_WAVES)
     gap = _int_arg('gap', stagger, lo=0, hi=10000)
@@ -628,15 +663,16 @@ def effect():
         # Hold the sequencer off for the whole effect so it cannot overwrite the sweep.
         effect_until = time.monotonic() + total_ms / 1000.0
 
-    log.emit("EFFECT    start data=%r panels=%d stagger=%dms waves=%d (~%.1fs)"
-             % (data, n, stagger, waves, total_ms / 1000.0))
+    log.emit("EFFECT    start data=%r panels=%d stagger=%dms(%s) waves=%d (~%.1fs)"
+             % (data, n, stagger, stagger_mode, waves, total_ms / 1000.0))
     threading.Thread(target=run_effect,
                      args=(ordered, data, stagger, lead, waves, gap, wave_len),
                      daemon=True).start()
 
     return jsonify({"status": "ok", "panels": n, "order": [cid for _ip, cid in ordered],
-                    "stagger_ms": stagger, "waves": waves, "data": data,
-                    "duration_ms": total_ms})
+                    "stagger_ms": stagger, "stagger_mode": stagger_mode,
+                    "full_go_ms": full_go, "factor": factor,
+                    "waves": waves, "data": data, "duration_ms": total_ms})
 
 
 IDENTIFY_LEAD_MS = 500   # small lead: ids loop continuously, so keep the blank gap short

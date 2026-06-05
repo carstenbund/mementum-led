@@ -511,8 +511,10 @@
             var p = new URLSearchParams();
             var data = document.getElementById('effectData').value;
             if (data) p.set('data', data);
-            var stagger = parseInt(document.getElementById('effectStagger').value, 10);
-            if (!isNaN(stagger)) p.set('stagger', stagger);
+            var stagger = document.getElementById('effectStagger').value.trim();
+            if (stagger) p.set('stagger', stagger);    // 'auto' or fixed ms
+            var factor = document.getElementById('effectFactor').value.trim();
+            if (factor) p.set('factor', factor);
             var waves = parseInt(document.getElementById('effectWaves').value, 10);
             if (!isNaN(waves) && waves > 1) p.set('waves', waves);
             var order = document.getElementById('effectOrder').value.trim();
@@ -522,19 +524,23 @@
             fetch('/effect?' + p.toString()).then(function(r) {
                 return r.ok ? r.json() : Promise.reject();
             }).then(function(d) {
-                effectStatus('Effekt läuft: ' + d.panels + ' Panel(s), Reihenfolge ' +
-                    (d.order || []).join(',') + ', ~' + Math.round(d.duration_ms / 1000) + ' s');
+                effectStatus('Effekt läuft: ' + d.panels + ' Panel(s), Versatz ' +
+                    d.stagger_ms + ' ms (' + d.stagger_mode + ', volle Anzeige ' +
+                    d.full_go_ms + ' ms), Reihenfolge ' + (d.order || []).join(',') +
+                    ', ~' + Math.round(d.duration_ms / 1000) + ' s');
             }).catch(function() { effectStatus('Fehler / keine Clients'); });
         }
 
-        // Quick presets: set the fields and fire immediately.
+        // Quick presets: set the fields (content-derived stagger) and fire immediately.
         function effectPreset(kind) {
             var dataEl = document.getElementById('effectData');
             var stagEl = document.getElementById('effectStagger');
+            var facEl = document.getElementById('effectFactor');
             var wavEl = document.getElementById('effectWaves');
-            if (kind === 'star')   { dataEl.value = '*';      stagEl.value = 960; wavEl.value = 1; }
-            if (kind === 'stream') { dataEl.value = '* * *';  stagEl.value = 700; wavEl.value = 1; }
-            if (kind === 'comet')  { dataEl.value = '@cyan*'; stagEl.value = 500; wavEl.value = 1; }
+            stagEl.value = 'auto'; wavEl.value = 1;
+            if (kind === 'star')   { dataEl.value = '*';      facEl.value = 1; }
+            if (kind === 'stream') { dataEl.value = '* * *';  facEl.value = 1; }
+            if (kind === 'comet')  { dataEl.value = '@cyan*'; facEl.value = 0.5; }
             runEffect();
         }
 
@@ -647,11 +653,14 @@
 
             <!-- Effekt-Parameter -->
             <div class="frag-row" style="align-items: center; margin-top: 8px;">
-                <label for="effectData">Zeichen:</label>
-                <input type="text" id="effectData" maxlength="100" value="*" style="width: 6em;">
-                <label for="effectStagger">Versatz (ms):</label>
-                <input type="number" id="effectStagger" min="0" max="5000" step="10" value="960"
-                       style="width: 5em;">
+                <label for="effectData">Zeichen / Wort:</label>
+                <input type="text" id="effectData" maxlength="100" value="*" style="width: 8em;">
+                <label for="effectStagger">Versatz:</label>
+                <input type="text" id="effectStagger" value="auto" style="width: 4em;"
+                       title="auto = eine volle Anzeigedauer pro Panel (aus der Zeichenbreite), oder feste ms">
+                <label for="effectFactor">Faktor:</label>
+                <input type="number" id="effectFactor" min="0.05" max="5" step="0.05" value="1"
+                       style="width: 4em;" title="<1 = überlappender Gleitflug, 1 = sauberer Sprung, >1 = Lücke">
                 <label for="effectWaves">Wellen:</label>
                 <input type="number" id="effectWaves" min="1" max="20" step="1" value="1"
                        style="width: 4em;">
