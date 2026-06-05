@@ -479,6 +479,75 @@
         function togglePause(cb) { logPaused = cb.checked; }
         function clearLog() { document.getElementById('logWindow').innerHTML = ''; }
 
+        // ---- Effekte & Diagnose (Pi-Server only: /effect, /identify) ----
+        function toggleEffects() {
+            var body = document.getElementById('effectsBody');
+            var open = body.style.display === 'none';
+            body.style.display = open ? 'block' : 'none';
+            document.getElementById('effectsCaret').innerHTML = open ? '&#9662;' : '&#9656;';
+        }
+
+        function effectStatus(msg) {
+            var s = document.getElementById('effectStatus');
+            if (s) s.textContent = msg;
+        }
+
+        // Diagnose: each panel shows its own id so the physical chain can be read off the
+        // wall. Prefill the sweep order with the panels that answered, as a starting point.
+        function runIdentify() {
+            var secs = parseInt(document.getElementById('identifySeconds').value, 10) || 20;
+            effectStatus('Nummeriere…');
+            fetch('/identify?seconds=' + secs).then(function(r) {
+                return r.ok ? r.json() : Promise.reject();
+            }).then(function(d) {
+                var ids = (d.panels || []).join(',');
+                if (ids) document.getElementById('effectOrder').value = ids;
+                effectStatus(d.panels.length + ' Panel(s): ' + ids +
+                    ' — Reihenfolge an der Wand ablesen und als „Reihenfolge" eintragen.');
+            }).catch(function() { effectStatus('Fehler / keine Clients'); });
+        }
+
+        function runEffect() {
+            var p = new URLSearchParams();
+            var data = document.getElementById('effectData').value;
+            if (data) p.set('data', data);
+            var stagger = document.getElementById('effectStagger').value.trim();
+            if (stagger) p.set('stagger', stagger);    // 'auto' or fixed ms
+            var factor = document.getElementById('effectFactor').value.trim();
+            if (factor) p.set('factor', factor);
+            var waves = parseInt(document.getElementById('effectWaves').value, 10);
+            if (!isNaN(waves) && waves > 1) p.set('waves', waves);
+            var order = document.getElementById('effectOrder').value.trim();
+            if (order) p.set('order', order);
+            if (document.getElementById('effectReverse').checked) p.set('reverse', '1');
+            effectStatus('Starte Effekt…');
+            fetch('/effect?' + p.toString()).then(function(r) {
+                return r.ok ? r.json() : Promise.reject();
+            }).then(function(d) {
+                effectStatus('Effekt läuft: ' + d.panels + ' Panel(s), Versatz ' +
+                    d.stagger_ms + ' ms (' + d.stagger_mode + ', volle Anzeige ' +
+                    d.full_go_ms + ' ms), Reihenfolge ' + (d.order || []).join(',') +
+                    ', ~' + Math.round(d.duration_ms / 1000) + ' s');
+            }).catch(function() { effectStatus('Fehler / keine Clients'); });
+        }
+
+        // Quick presets: set the fields and fire immediately.
+        function effectPreset(kind) {
+            var dataEl = document.getElementById('effectData');
+            var stagEl = document.getElementById('effectStagger');
+            var facEl = document.getElementById('effectFactor');
+            var wavEl = document.getElementById('effectWaves');
+            wavEl.value = 1;
+            // 'Lauftext': one continuous marquee across the wall, using whatever text is in
+            // the box; keep the user's text rather than overwriting it.
+            if (kind === 'marquee') { stagEl.value = 'tile'; facEl.value = 1; runEffect(); return; }
+            stagEl.value = 'auto';
+            if (kind === 'star')   { dataEl.value = '*';      facEl.value = 1; }
+            if (kind === 'stream') { dataEl.value = '* * *';  facEl.value = 1; }
+            if (kind === 'comet')  { dataEl.value = '@cyan*'; facEl.value = 0.5; }
+            runEffect();
+        }
+
         window.onload = function() {
             fetch('/setBrowserTime?epoch=' + Math.floor(Date.now() / 1000)).catch(function(){});
             fetchSentStrings();
@@ -568,6 +637,52 @@
                        style="width: 4em;" onchange="setGlobalMaxPlays()">
                 <span id="globalMaxPlaysStatus" class="muted"></span>
             </div>
+        </div>
+    </div>
+
+    <div class="container" id="effectsSection">
+        <h3 id="effectsHeader" style="cursor: pointer; user-select: none;" onclick="toggleEffects()">
+            <span id="effectsCaret">&#9656;</span> Effekte &amp; Diagnose
+            <span class="muted">(zeitversetzte Sequenzen über die Panels)</span>
+        </h3>
+        <div id="effectsBody" style="display: none;">
+            <!-- Diagnose: jedes Panel zeigt seine eigene ID -->
+            <div class="frag-row" style="align-items: center;">
+                <button onclick="runIdentify()">Panels nummerieren</button>
+                <label for="identifySeconds">Dauer (s):</label>
+                <input type="number" id="identifySeconds" min="1" max="600" step="1" value="20"
+                       style="width: 4em;">
+                <span class="muted">— ID an der Wand ablesen</span>
+            </div>
+
+            <!-- Effekt-Parameter -->
+            <div class="frag-row" style="align-items: center; margin-top: 8px;">
+                <label for="effectData">Zeichen / Wort:</label>
+                <input type="text" id="effectData" maxlength="100" value="*" style="width: 8em;">
+                <label for="effectStagger">Versatz:</label>
+                <input type="text" id="effectStagger" value="auto" style="width: 4em;"
+                       title="auto = eine volle Anzeigedauer pro Panel; tile = durchgehender Lauftext über alle Panels; oder feste ms">
+                <label for="effectFactor">Faktor:</label>
+                <input type="number" id="effectFactor" min="0.05" max="5" step="0.05" value="1"
+                       style="width: 4em;" title="<1 = überlappender Gleitflug, 1 = sauberer Sprung, >1 = Lücke">
+                <label for="effectWaves">Wellen:</label>
+                <input type="number" id="effectWaves" min="1" max="20" step="1" value="1"
+                       style="width: 4em;">
+            </div>
+            <div class="frag-row" style="align-items: center;">
+                <label for="effectOrder">Reihenfolge (IDs):</label>
+                <input type="text" id="effectOrder" placeholder="z. B. 2,0,1" style="width: 8em;">
+                <label><input type="checkbox" id="effectReverse"> Rückwärts</label>
+                <button onclick="runEffect()">Effekt starten</button>
+            </div>
+            <div class="frag-row" style="align-items: center;">
+                <span class="muted">Schnell:</span>
+                <button onclick="effectPreset('star')">&#9733; Stern</button>
+                <button onclick="effectPreset('stream')">&#10022; Strom</button>
+                <button onclick="effectPreset('comet')">&#9732; Komet</button>
+                <button onclick="effectPreset('marquee')" title="Text aus dem Feld als durchgehender Lauftext über alle Panels">&#10231; Lauftext</button>
+            </div>
+            <div id="effectStatus" class="muted" style="margin-top: 6px;"></div>
         </div>
     </div>
 

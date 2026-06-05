@@ -147,6 +147,13 @@ next_client_id = 0
 global_seq = 0                # monotonic schedule sequence number
 PURGE_INACTIVE = 3600         # seconds: drop a disappeared client from the table after this
 
+# ---- Effects (experimental) ----
+# A staggered, time-coded effect schedules the SAME glyph on each panel at a slightly
+# different start time, so it appears to travel across the wall ("a thing moving through").
+# While an effect is running the sequencer pauses so it does not overwrite the sweep.
+effect_until = 0.0            # time.monotonic() until which the sequencer holds off
+EFFECT_MAX_WAVES = 20         # safety cap on repeated sweeps per /effect call
+
 _clock_start = time.monotonic()
 
 
@@ -283,6 +290,38 @@ def _broadcast(route, params, targets):
 def broadcast_play(seq, text, display_at, targets):
     """Push a timed /play command to all clients concurrently."""
     _broadcast("/play", {'seq': seq, 'at': display_at, 'data': text}, targets)
+
+
+def broadcast_play_each(items):
+    """Push /play to each panel with its OWN params (its own start time and/or text).
+
+    `items` is a list of (ip, params). Fans out concurrently and returns the number of
+    panels that ACKed. This is the per-panel cousin of _broadcast(): effects and the
+    identify diagnostic need each panel to receive something different.
+    """
+    if not items:
+        return 0
+    futures = {ip: _broadcast_pool.submit(_get_client, ip, "/play", params)
+               for ip, params in items}
+    ok = 0
+    for ip, fut in futures.items():
+        success, info = fut.result()  # bounded by BROADCAST_TIMEOUT
+        if success:
+            ok += 1
+        else:
+            log.emit("PLAY-EACH play FAILED IP=%s: %s" % (ip, info))
+    return ok
+
+
+def broadcast_play_staggered(seq, text, schedule):
+    """Push the same glyph to each panel at its OWN start time.
+
+    `schedule` is a list of (ip, cid, display_at). All start times are in the shared
+    server clock domain, so each panel renders the same glyph at a different instant and
+    it appears to sweep across the wall.
+    """
+    return broadcast_play_each(
+        [(ip, {'seq': seq, 'at': at, 'data': text}) for ip, _cid, at in schedule])
 
 
 def broadcast_simple(route, targets):
@@ -507,6 +546,215 @@ def play():
     return "OK", 200
 
 
+def _int_arg(name, default, lo=None, hi=None):
+    """Parse an integer query arg, falling back to `default`, clamped to [lo, hi]."""
+    raw = request.args.get(name, '')
+    value = int(raw) if raw.lstrip('-').isdigit() else default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
+def _float_arg(name, default, lo=None, hi=None):
+    """Parse a float query arg, falling back to `default`, clamped to [lo, hi]."""
+    raw = request.args.get(name, '')
+    try:
+        value = float(raw)
+    except ValueError:
+        value = default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
+def run_effect(ordered, data, stagger, lead, waves, gap, wave_len):
+    """Fire one or more staggered sweeps across the panels (runs in its own thread).
+
+    Each wave re-reads the live clock so repeated sweeps never drift, and paces itself so
+    the next wave starts only after the previous one has cleared the last panel + `gap`.
+    """
+    global global_seq
+    for w in range(waves):
+        with state_lock:
+            global_seq += 1
+            seq = global_seq
+        base = (server_now() + lead) & 0xFFFFFFFF
+        sched = [(ip, cid, (base + k * stagger) & 0xFFFFFFFF)
+                 for k, (ip, cid) in enumerate(ordered)]
+        ok = broadcast_play_staggered(seq, data, sched)
+        log.emit("EFFECT    wave %d/%d seq=%d panels=%d ok=%d data=%r"
+                 % (w + 1, waves, seq, len(ordered), ok, data))
+        # send -> first panel at +lead, last panel finishes at +lead+wave_len; +gap idle.
+        time.sleep((lead + wave_len + gap) / 1000.0)
+
+
+@app.route("/effect")
+def effect():
+    """Staggered, time-coded effect: schedule the same glyph on every panel at a slightly
+    different start time so it appears to travel across the wall.
+
+    Query params (all optional):
+      data     glyph/text to sweep (default '*'). '* * *' = a stream of stars;
+               '@cyan*' = a coloured star; '*..' = a star with a little tail.
+      stagger  delay between adjacent panels:
+                 'auto' (default) = one full display of the content on a node ('a full
+                   go'), from scroll_duration_ms() which sums each letter's real width via
+                   the getCharWidth hint, so narrow letters (i, l, !, .) stagger correctly;
+                 'tile' = exactly one panel width (8 px), so the content tiles into one
+                   long continuous marquee across the whole wall (leaves one node, enters
+                   the next);
+                 a number = fixed ms.
+      factor   scales the auto/tile stagger (default 1.0): for 'auto', 1 = clean hop, <1
+               overlaps into a glide, >1 leaves a gap; for 'tile', >1 compensates for a
+               physical bezel gap between panels.
+      reverse  '1' to flip the sweep direction across the panel order.
+      lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
+      waves    replay the whole sweep this many times (default 1).
+      gap      ms of darkness between waves (default = stagger).
+      order    explicit comma-separated client IDs giving the sweep order
+               (default: ascending client id). Use this to match your physical layout.
+
+    Examples: /effect                 -> one '*' hopping panel to panel (auto stagger)
+              /effect?data=Hallo      -> the word travels the wall, timed to its letters
+              /effect?factor=0.5      -> overlap into a continuous glide
+              /effect?stagger=700&waves=3
+    """
+    global effect_until
+
+    data = request.args.get('data', '*')[:MAX_TEXT_LENGTH]
+
+    # Universal stagger: by default, delay each panel by one full display of the content
+    # ('a full go'). scroll_duration_ms() already accounts for variable letter widths via
+    # the getCharWidth hint, so this is the content-aware "universal stagger". `factor`
+    # tunes it; a numeric `stagger` overrides with a fixed value in ms.
+    factor = _float_arg('factor', 1.0, lo=0.05, hi=5.0)
+    full_go = scroll_duration_ms(data)
+    tile_stagger = MATRIX_WIDTH * SCROLL_INTERVAL_MS  # one panel width of scroll (960 ms)
+    raw_stagger = request.args.get('stagger', 'auto').strip().lower()
+    if raw_stagger.lstrip('-').isdigit():
+        stagger = max(0, min(5000, int(raw_stagger)))
+        stagger_mode = 'fixed'
+    elif raw_stagger == 'tile':
+        # Continuous "long display": offset each panel by exactly one panel width so the
+        # content tiles seamlessly across the wall -- what scrolls off one node enters the
+        # next, turning the panels into one long marquee. factor > 1 compensates for a
+        # physical gap/bezel between panels (a touch more than 8 px of travel per panel).
+        stagger = max(1, min(5000, round(tile_stagger * factor)))
+        stagger_mode = 'tile'
+    else:  # 'auto' (default): one full display of the content per panel (a discrete hop)
+        stagger = max(1, min(5000, round(full_go * factor)))
+        stagger_mode = 'auto'
+
+    lead = _int_arg('lead', DISPLAY_LEAD_MS, lo=0, hi=10000)
+    waves = _int_arg('waves', 1, lo=1, hi=EFFECT_MAX_WAVES)
+    gap = _int_arg('gap', stagger, lo=0, hi=10000)
+    reverse = request.args.get('reverse', '0') not in ('0', '', 'false', 'False')
+
+    with state_lock:
+        targets = snapshot_targets()  # [(ip, cid), ...] active clients only
+        if request.args.get('order'):
+            wanted = [int(x) for x in request.args['order'].split(',')
+                      if x.lstrip('-').isdigit()]
+            by_id = {cid: ip for ip, cid in targets}
+            ordered = [(by_id[c], c) for c in wanted if c in by_id]
+        else:
+            ordered = sorted(targets, key=lambda t: t[1])  # by client id
+        if reverse:
+            ordered = list(reversed(ordered))
+
+        if not ordered:
+            return jsonify({"status": "error", "message": "No active clients."}), 400
+
+        n = len(ordered)
+        span = (n - 1) * stagger                  # first-panel-start .. last-panel-start
+        wave_len = span + scroll_duration_ms(data)  # until the last panel finishes scrolling
+        total_ms = waves * (lead + wave_len + gap)
+        # Hold the sequencer off for the whole effect so it cannot overwrite the sweep.
+        effect_until = time.monotonic() + total_ms / 1000.0
+
+    log.emit("EFFECT    start data=%r panels=%d stagger=%dms(%s) waves=%d (~%.1fs)"
+             % (data, n, stagger, stagger_mode, waves, total_ms / 1000.0))
+    threading.Thread(target=run_effect,
+                     args=(ordered, data, stagger, lead, waves, gap, wave_len),
+                     daemon=True).start()
+
+    return jsonify({"status": "ok", "panels": n, "order": [cid for _ip, cid in ordered],
+                    "stagger_ms": stagger, "stagger_mode": stagger_mode,
+                    "full_go_ms": full_go, "factor": factor,
+                    "waves": waves, "data": data, "duration_ms": total_ms})
+
+
+IDENTIFY_LEAD_MS = 500   # small lead: ids loop continuously, so keep the blank gap short
+
+
+def run_identify(seconds, repeat, fmt):
+    """Keep each panel showing its OWN id for `seconds` (runs in its own thread).
+
+    Every cycle re-schedules each panel with its id string (a fresh seq, the same start
+    instant for all) so the ids stay on screen continuously while you walk the wall.
+    Re-reads the client list each cycle so a panel that (re)joins mid-run gets labelled too.
+    """
+    global global_seq
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        with state_lock:
+            targets = snapshot_targets()
+            global_seq += 1
+            seq = global_seq
+            at = (server_now() + IDENTIFY_LEAD_MS) & 0xFFFFFFFF
+            items = [(ip, {'seq': seq, 'at': at, 'data': fmt.format(id=cid) * repeat})
+                     for ip, cid in targets]
+        if not items:
+            time.sleep(0.2)
+            continue
+        broadcast_play_each(items)
+        # Pace to the longest id string so every panel finishes before the next cycle.
+        cycle = max(scroll_duration_ms(p['data']) for _ip, p in items)
+        time.sleep((IDENTIFY_LEAD_MS + cycle) / 1000.0)
+    log.emit("IDENTIFY  done")
+
+
+@app.route("/identify")
+def identify():
+    """Diagnostic: show every panel its OWN client id so you can read the physical layout
+    off the wall and build the /effect order= list.
+
+    Query params (all optional):
+      seconds  how long to keep the ids on screen (default 20)
+      repeat   how many times the id string repeats, e.g. 3 -> '0 0 0 ' (default 3)
+      fmt      Python format for one label; {id} is the client id (default '{id} ').
+               e.g. fmt=ID{id}%20 for 'ID0 ', or fmt=%23{id}%20 for '#0 '
+
+    Walk the wall, note each panel's number left-to-right, then drive the sweep with
+    /effect?order=<those ids>. Holds the text sequencer off while it runs.
+    """
+    global effect_until
+    seconds = _int_arg('seconds', 20, lo=1, hi=600)
+    repeat = _int_arg('repeat', 3, lo=1, hi=20)
+    fmt = request.args.get('fmt', '{id} ')
+    # Validate the format string against an injection / bad-field mistake before we loop.
+    try:
+        fmt.format(id=0)
+    except (KeyError, IndexError, ValueError):
+        return jsonify({"status": "error",
+                        "message": "Invalid fmt; use {id}, e.g. '{id} '."}), 400
+
+    with state_lock:
+        targets = snapshot_targets()
+        if not targets:
+            return jsonify({"status": "error", "message": "No active clients."}), 400
+        effect_until = time.monotonic() + seconds  # reuse the sequencer-hold mechanism
+
+    panels = sorted(cid for _ip, cid in targets)
+    log.emit("IDENTIFY  start panels=%d seconds=%d ids=%s" % (len(targets), seconds, panels))
+    threading.Thread(target=run_identify, args=(seconds, repeat, fmt), daemon=True).start()
+    return jsonify({"status": "ok", "panels": panels, "seconds": seconds})
+
+
 @app.route("/RGBOn")
 def rgb_on():
     # Firmware handles RGB locally and does not broadcast it; no panel here.
@@ -636,7 +884,9 @@ def sequencer():
     while True:
         text = None
         with state_lock:
-            n = len(sent_strings)
+            # An effect is sweeping the wall: hold off so we don't overwrite it. Leaving
+            # text=None routes us to the idle sleep below, same as an empty queue.
+            n = 0 if time.monotonic() < effect_until else len(sent_strings)
             if n:
                 if cur_index >= n:
                     cur_index = 0
