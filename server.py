@@ -600,12 +600,17 @@ def effect():
     Query params (all optional):
       data     glyph/text to sweep (default '*'). '* * *' = a stream of stars;
                '@cyan*' = a coloured star; '*..' = a star with a little tail.
-      stagger  delay between adjacent panels. Default 'auto' = one full display of the
-               content on a node ('a full go'), derived from scroll_duration_ms() which
-               sums each letter's real width via the getCharWidth hint -- so words with
-               narrow letters (i, l, !, .) stagger correctly. Pass a number for fixed ms.
-      factor   scales the auto stagger (default 1.0): 1 = clean hop one panel then the
-               next; <1 overlaps into a continuous glide; >1 leaves a gap between panels.
+      stagger  delay between adjacent panels:
+                 'auto' (default) = one full display of the content on a node ('a full
+                   go'), from scroll_duration_ms() which sums each letter's real width via
+                   the getCharWidth hint, so narrow letters (i, l, !, .) stagger correctly;
+                 'tile' = exactly one panel width (8 px), so the content tiles into one
+                   long continuous marquee across the whole wall (leaves one node, enters
+                   the next);
+                 a number = fixed ms.
+      factor   scales the auto/tile stagger (default 1.0): for 'auto', 1 = clean hop, <1
+               overlaps into a glide, >1 leaves a gap; for 'tile', >1 compensates for a
+               physical bezel gap between panels.
       reverse  '1' to flip the sweep direction across the panel order.
       lead     ms before the first panel starts (default DISPLAY_LEAD_MS).
       waves    replay the whole sweep this many times (default 1).
@@ -628,11 +633,19 @@ def effect():
     # tunes it; a numeric `stagger` overrides with a fixed value in ms.
     factor = _float_arg('factor', 1.0, lo=0.05, hi=5.0)
     full_go = scroll_duration_ms(data)
-    raw_stagger = request.args.get('stagger', 'auto')
+    tile_stagger = MATRIX_WIDTH * SCROLL_INTERVAL_MS  # one panel width of scroll (960 ms)
+    raw_stagger = request.args.get('stagger', 'auto').strip().lower()
     if raw_stagger.lstrip('-').isdigit():
         stagger = max(0, min(5000, int(raw_stagger)))
         stagger_mode = 'fixed'
-    else:  # 'auto' (default) or any non-numeric value
+    elif raw_stagger == 'tile':
+        # Continuous "long display": offset each panel by exactly one panel width so the
+        # content tiles seamlessly across the wall -- what scrolls off one node enters the
+        # next, turning the panels into one long marquee. factor > 1 compensates for a
+        # physical gap/bezel between panels (a touch more than 8 px of travel per panel).
+        stagger = max(1, min(5000, round(tile_stagger * factor)))
+        stagger_mode = 'tile'
+    else:  # 'auto' (default): one full display of the content per panel (a discrete hop)
         stagger = max(1, min(5000, round(full_go * factor)))
         stagger_mode = 'auto'
 

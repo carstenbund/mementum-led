@@ -531,13 +531,17 @@
             }).catch(function() { effectStatus('Fehler / keine Clients'); });
         }
 
-        // Quick presets: set the fields (content-derived stagger) and fire immediately.
+        // Quick presets: set the fields and fire immediately.
         function effectPreset(kind) {
             var dataEl = document.getElementById('effectData');
             var stagEl = document.getElementById('effectStagger');
             var facEl = document.getElementById('effectFactor');
             var wavEl = document.getElementById('effectWaves');
-            stagEl.value = 'auto'; wavEl.value = 1;
+            wavEl.value = 1;
+            // 'Lauftext': one continuous marquee across the wall, using whatever text is in
+            // the box; keep the user's text rather than overwriting it.
+            if (kind === 'marquee') { stagEl.value = 'tile'; facEl.value = 1; runEffect(); return; }
+            stagEl.value = 'auto';
             if (kind === 'star')   { dataEl.value = '*';      facEl.value = 1; }
             if (kind === 'stream') { dataEl.value = '* * *';  facEl.value = 1; }
             if (kind === 'comet')  { dataEl.value = '@cyan*'; facEl.value = 0.5; }
@@ -657,7 +661,7 @@
                 <input type="text" id="effectData" maxlength="100" value="*" style="width: 8em;">
                 <label for="effectStagger">Versatz:</label>
                 <input type="text" id="effectStagger" value="auto" style="width: 4em;"
-                       title="auto = eine volle Anzeigedauer pro Panel (aus der Zeichenbreite), oder feste ms">
+                       title="auto = eine volle Anzeigedauer pro Panel; tile = durchgehender Lauftext über alle Panels; oder feste ms">
                 <label for="effectFactor">Faktor:</label>
                 <input type="number" id="effectFactor" min="0.05" max="5" step="0.05" value="1"
                        style="width: 4em;" title="<1 = überlappender Gleitflug, 1 = sauberer Sprung, >1 = Lücke">
@@ -676,6 +680,7 @@
                 <button onclick="effectPreset('star')">&#9733; Stern</button>
                 <button onclick="effectPreset('stream')">&#10022; Strom</button>
                 <button onclick="effectPreset('comet')">&#9732; Komet</button>
+                <button onclick="effectPreset('marquee')" title="Text aus dem Feld als durchgehender Lauftext über alle Panels">&#10231; Lauftext</button>
             </div>
             <div id="effectStatus" class="muted" style="margin-top: 6px;"></div>
         </div>
