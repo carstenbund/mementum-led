@@ -120,8 +120,30 @@
         var sentStrings = [];
         var preMadeStrings = [];
 
+        // Map the firmware @color prefixes to readable CSS hues (matching the colour
+        // buttons), so queued/preset/typed text previews in roughly the colour it will play.
+        var PLAY_COLORS = {
+            '@red':    '#e23b3b', '@green':  '#2eb82e', '@blue':   '#3b82e2',
+            '@pink':   '#e23b9c', '@yellow': '#b59000', '@cyan':   '#0aa3a3'
+        };
+        // Detect a leading @color prefix. Returns {key, css} or null.
+        function playColor(text) {
+            var t = (text || '').toLowerCase();
+            for (var k in PLAY_COLORS) { if (t.indexOf(k) === 0) return { key: k, css: PLAY_COLORS[k] }; }
+            return null;
+        }
+        // The visible text with the prefix removed and a leading colour dot, for a row/button.
+        function colorizedLabel(text) {
+            var c = playColor(text);
+            if (!c) return { html: null, css: null };
+            var rest = text.substring(c.key.length).replace(/^\s+/, '');
+            return { html: '● ' + rest, css: c.css };
+        }
+
         function setColor(color) {
             selectedColor = color;
+            // Live preview: tint the input in the chosen colour.
+            document.getElementById('Text').style.color = PLAY_COLORS[color] || '';
             if (document.getElementById('Text').value.trim()) {
                 sendData();
             }
@@ -155,6 +177,7 @@
 
         function clearText() {
             document.getElementById('Text').value = '';
+            document.getElementById('Text').style.color = '';
             selectedColor = '';
             var xhr = new XMLHttpRequest();
             xhr.open('GET', '/clear', true);
@@ -379,8 +402,11 @@
                 if (item && typeof item === 'object') {
                     badge = ` <span class="muted">(${item.plays}/${item.limit}×)</span>`;
                 }
+                var col = colorizedLabel(text);
+                var labelInner = (col.html !== null) ? col.html : text;
+                var labelStyle = col.css ? ` style="color:${col.css}"` : '';
                 option.innerHTML = `<input type="checkbox" id="sent${index}" value="${text}">
-                                    <label for="sent${index}">${text}</label>${badge}`;
+                                    <label for="sent${index}"${labelStyle}>${labelInner}</label>${badge}`;
                 list.appendChild(option);
             });
         }
@@ -390,7 +416,9 @@
             container.innerHTML = '';
             preMadeStrings.forEach(function(str) {
                 var button = document.createElement('button');
-                button.textContent = str;
+                var col = colorizedLabel(str);
+                button.textContent = (col.html !== null) ? col.html : str;
+                if (col.css) button.style.color = col.css;
                 button.onclick = function() {
                     document.getElementById('Text').value = str;
                 };
