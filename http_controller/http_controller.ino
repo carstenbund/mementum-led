@@ -7,6 +7,10 @@
 char Project[20] = "mementumLED";
 char Version[20] = "1.4.4";
 
+// Uncomment to show rotating spinner and SERVER/CLIENT text during startup/election.
+// When undefined, a cyan (client) or pink (server) dot blinks 3× on role settle instead.
+// #define DEBUG_SPINNER
+
 char apSSID[64] = "ESP32-S3-Matrix";
 char apPSK[64]  = "waveshare";
 
@@ -254,10 +258,39 @@ void clientPlayerLoop() {
     delay(5);
 }
 
+#ifndef DEBUG_SPINNER
+// Dot-blink state for non-debug role announcement
+static uint16_t dotBlinkColor = 0;
+static int      dotBlinkPhase = 0;       // 6..1 = active (even=on, odd=off), 0 = idle
+static unsigned long dotBlinkLast = 0;
+static const unsigned long DOT_BLINK_MS = 300;
+
+void startDotBlink(uint16_t color) {
+    dotBlinkColor = color;
+    dotBlinkPhase = 6;
+    dotBlinkLast  = millis() - DOT_BLINK_MS;  // trigger first step immediately
+}
+
+// Returns true while blinking; caller skips the normal role loop until done.
+bool dotBlinkTick() {
+    if (dotBlinkPhase <= 0) return false;
+    if (millis() - dotBlinkLast < DOT_BLINK_MS) return true;
+    dotBlinkLast = millis();
+    Matrix.fillScreen(0);
+    if (dotBlinkPhase % 2 == 0) {              // even phases: dot on
+        Matrix.drawPixel(3, 3, dotBlinkColor);
+    }
+    Matrix.show();
+    dotBlinkPhase--;
+    return dotBlinkPhase > 0;
+}
+#endif
+
 // While electing (no server yet, or contesting after a loss) the node is neither rendering
 // a queue nor a /play schedule, so show a small rotating glyph to signal "configuring /
 // waiting for network" instead of going dark.
 void electionSpinnerLoop() {
+#ifdef DEBUG_SPINNER
     static const char frames[] = {'|', '/', '-', '\\'};
     static int frame = 0;
     static unsigned long lastStep = 0;
@@ -269,20 +302,37 @@ void electionSpinnerLoop() {
     Matrix.print(frames[frame]);
     Matrix.show();
     frame = (frame + 1) & 3;
+#else
+    static bool cleared = false;
+    if (!cleared) { Matrix.fillScreen(0); Matrix.show(); cleared = true; }
+    yield(); delay(50);
+#endif
 }
 
 void Display_Loop() {
     static NodeRole lastRole = ROLE_JOINING;
 
-    // On role transition from election -> settled role: clear the spinner and announce.
+    // On role transition from election -> settled role: announce the new role.
     if (nodeRole != lastRole) {
+#ifdef DEBUG_SPINNER
         if (nodeRole == ROLE_SERVER) {
             xdisplayText((char*)"SERVER");
         } else if (nodeRole == ROLE_CLIENT) {
             xdisplayText((char*)"CLIENT");
         }
+#else
+        if (nodeRole == ROLE_SERVER) {
+            startDotBlink(PINK_COLOR);   // pink dot = server
+        } else if (nodeRole == ROLE_CLIENT) {
+            startDotBlink(CYAN_COLOR);   // cyan dot = client
+        }
+#endif
         lastRole = nodeRole;
     }
+
+#ifndef DEBUG_SPINNER
+    if (dotBlinkTick()) return;   // hold off the role loop while blinking
+#endif
 
     switch (nodeRole) {
         case ROLE_SERVER: serverSequencerLoop(); break; // master sequencer
